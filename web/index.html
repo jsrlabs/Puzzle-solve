@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Puzzle Helper</title>
-  <meta name="description" content="Photograph a jigsaw box and your loose pieces; get told which two pieces to join next.">
+  <meta name="description" content="Photograph a jigsaw box and your loose pieces; get told which piece to place next and where.">
   <meta name="theme-color" content="#3f51b5">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
@@ -17,8 +17,8 @@
     <section id="setup">
       <header>
         <h1>Puzzle Helper</h1>
-        <p class="muted">Photograph the box picture and your loose pieces. The app finds two loose pieces that belong
-          next to each other and shows you how to join them. Everything runs on your device; photos are never uploaded.</p>
+        <p class="muted">Photograph the box picture and your loose pieces. The app tells you which piece to place next and
+          where it goes, always next to pieces already on your board, starting from a corner. Everything runs on your device; photos are never uploaded.</p>
       </header>
 
       <div class="card">
@@ -63,7 +63,7 @@
         <div class="bar"><div id="progressFill"></div></div>
         <button id="cancel" class="btn text">Cancel</button>
       </div>
-      <button id="analyze" class="btn primary big" disabled>Find a matching pair</button>
+      <button id="analyze" class="btn primary big" disabled>Find the next piece</button>
       <button id="backToResult" class="btn big" hidden>Back to suggestions</button>
     </section>
 
@@ -77,35 +77,44 @@
 
       <div id="suggestion">
         <div class="card">
-          <h2 class="big-title">Join these two pieces</h2>
-          <p id="joinText" class="join"></p>
+          <h2 id="stepTitle" class="big-title">Place this piece</h2>
+          <p id="placeText" class="join"></p>
           <p id="turnText"></p>
           <p id="whereText" class="hint"></p>
           <p id="confText" class="hint"></p>
         </div>
 
-        <h3>Find these pieces</h3>
-        <canvas id="piecesZoom" class="view"></canvas>
-        <p class="hint">Where they are in your photo:</p>
-        <canvas id="piecesFull" class="view"></canvas>
-
-        <h3>Where they go in the picture</h3>
-        <canvas id="boxZoom" class="view"></canvas>
-        <canvas id="boxFull" class="view"></canvas>
-
+        <canvas id="composite" class="view" aria-label="Your board and loose pieces, with an arrow from the piece to its place"></canvas>
         <div class="row">
-          <button id="joined" class="btn primary grow">Joined! Next</button>
+          <button id="placed" class="btn primary grow">Placed it! Next</button>
           <button id="skip" class="btn grow">Doesn't fit / skip</button>
         </div>
-        <p id="remaining" class="hint"></p>
+
+        <h3>Close-up</h3>
+        <div class="pair">
+          <figure><canvas id="pieceZoom" class="view"></canvas><figcaption>The piece</figcaption></figure>
+          <figure><canvas id="boardZoom" class="view"></canvas><figcaption>Where it goes</figcaption></figure>
+        </div>
+        <button id="download" class="btn">Save image</button>
       </div>
 
       <div id="noSuggestion" hidden>
         <div class="card">
-          <h2>No more matching pairs in this photo</h2>
+          <h2>No piece to place from this photo</h2>
           <p id="noSuggestionText"></p>
         </div>
-        <canvas id="piecesAll" class="view"></canvas>
+        <canvas id="compositeEmpty" class="view"></canvas>
+      </div>
+
+      <div class="card">
+        <h2>Your board</h2>
+        <p class="hint" id="boardInfo"></p>
+        <p class="hint" id="editHint" hidden>Tap or drag over cells to mark pieces that are already on your board (tap again to clear). The next suggestion will connect to them.</p>
+        <canvas id="boardEdit" class="view" hidden></canvas>
+        <div class="row">
+          <button id="editBoard" class="btn">Mark pieces already placed</button>
+          <button id="clearBoard" class="btn text">Clear board</button>
+        </div>
       </div>
 
       <label class="switch"><input id="showAll" type="checkbox"> Show every detected piece</label>

@@ -42,10 +42,12 @@ export class SyntheticPuzzle {
   }
 
   /** Photo of `count` random pieces scattered in a loose grid. Returns { image, truths }. */
-  piecesPhoto(count, { scale = 1.8, gain = 0.85, offset = 12, background = [46, 90, 60], noise = 8 } = {}) {
+  /** `indices` (cell indices, row-major) picks specific pieces; otherwise `count` random ones. */
+  piecesPhoto(count, { scale = 1.8, gain = 0.85, offset = 12, background = [46, 90, 60], noise = 8, indices = null } = {}) {
     const all = Array.from({ length: this.cols * this.rows }, (_, i) => i);
     for (let i = all.length - 1; i > 0; i--) { const j = this.r.int(0, i + 1); [all[i], all[j]] = [all[j], all[i]]; }
-    const chosen = all.slice(0, count);
+    const chosen = indices ? [...indices].sort(() => this.r.next() - 0.5) : all.slice(0, count);
+    count = chosen.length;
     const slot = Math.round(this.cellPx * scale * 2);
     const slotsX = Math.max(1, Math.ceil(Math.sqrt(count * 1.5)));
     const slotsY = Math.ceil(count / slotsX);

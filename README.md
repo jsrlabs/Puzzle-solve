@@ -7,14 +7,15 @@ You take two photos:
 1. **The box picture**, which is the finished image.
 2. **Your loose pieces**, spread out picture-side up.
 
-The app finds two loose pieces that belong next to each other and tells you how to join them:
+The app then tells you which **one piece** to place next:
 
-* It circles both pieces in your photo and labels them **A** and **B**.
-* It draws an arrow on each piece showing which way is "up", and says how far to turn it.
-* It says which side of A that B attaches to.
-* It highlights the two spots in the box picture.
+* When your board is empty, it starts with a **corner** piece.
+* After that, every suggested piece **connects to a piece already on your board**.
+* It shows a **composite image**: your board, with placed areas bright and the rest dimmed, next to the photo of your loose pieces. A big arrow runs from the piece to its spot.
+* An arrow drawn on the piece shows which way is "up", and the text says how far to turn it.
+* Close-ups show the piece and its destination. **Save image** shares or downloads the composite.
 
-Tap **Joined! Next** to get another pair, or take a new photo of the remaining pieces.
+Tap **Placed it! Next** for the next piece. When none of the loose pieces connect any more, take a new photo of the remaining pieces; your board progress is kept. If you started the puzzle before using the app, use **Mark pieces already placed** and tap those cells on the board, so suggestions build on them.
 
 ## Getting good results
 
@@ -32,8 +33,8 @@ No build step and no dependencies: plain HTML, CSS and JavaScript modules.
 | --- | --- |
 | `web/index.html`, `styles.css`, `src/app.js` | The UI: photo capture, crop editor, results with drawn overlays. |
 | `web/src/worker.js` | Runs the solver in a Web Worker so the page stays responsive. |
-| `web/src/engine/` | The solver (see "How the solver works" below). Pure JavaScript, no DOM, so it also runs in Node. |
-| `web/test/` | Node tests that generate synthetic puzzles and check pieces land in the right place. |
+| `web/src/engine/` | The solver and the next-piece planner (see "How the solver works" below). Pure JavaScript, no DOM, so it also runs in Node. |
+| `web/test/` | Node tests that generate synthetic puzzles, check that pieces land in the right place, and simulate a placing session. |
 
 **Run it locally.** The page uses module workers, so it must be served over HTTP; opening `index.html` as a file won't work:
 
@@ -74,7 +75,7 @@ The web engine (`web/src/engine/`) and the Kotlin `core/` implement the same alg
    * A rotation-independent mean-color prefilter keeps this fast.
    * Run two passes. The second pass uses a color correction fitted on the first pass's confident matches, which compensates for lighting differences.
    * Confidence is how much better the best location is than the runner-up.
-3. **Suggest pairs** (`solver.js` / `PuzzleSolver`): find loose pieces whose locations are adjacent cells, and rank them by the lower of the two confidences.
+3. **Choose the next piece** (web: `planner.js`): among loose pieces whose cell is free and next to a placed cell, pick the most confident match, with a bonus for touching several placed pieces. When nothing connects, pick the most confident corner piece. (The Kotlin `PuzzleSolver` instead suggests pairs of loose pieces to join.)
 
 ## Building the Android app (paused)
 

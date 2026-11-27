@@ -1,8 +1,8 @@
-// Puzzle Helper web UI: photo capture, box cropping, running the solver in a worker, showing suggestions.
+// Puzzle Helper web UI: photo capture, box cropping, running the solver in a worker, suggesting the next piece.
+import { cellKey, cornerName, isEdge, nextPlacement } from './engine/planner.js';
 import { gridFromPieceCount } from './engine/solver.js';
 
 const MAX_IMAGE_DIM = 2400;
-const ANCHOR = '#00b8d4';
 const MOVER = '#ff2d87';
 
 const $ = (id) => document.getElementById(id);
@@ -14,8 +14,11 @@ const state = {
   pieces: null, // canvas holding the pieces photo
   analysis: null,
   analyzedBox: null, // cropped box canvas the analysis refers to
-  used: new Set(), // piece ids already joined
-  skipped: new Set(), // "anchor-mover" keys the user skipped
+  placed: new Set(), // cellKey()s of cells already on the user's board (kept across new pieces photos)
+  boardGrid: null, // grid the placed cells refer to
+  usedPieces: new Set(), // ids of loose pieces (in the current photo) that were placed
+  skipped: new Set(), // ids of loose pieces the user skipped
+  editingBoard: false,
   showAll: false,
 };
 
@@ -132,23 +135,6 @@ function drawArrow(ctx, map, from, dir, length, color) {
   ctx.lineTo(bx, by);
   ctx.lineTo(bx - nx * head + ny * head * 0.6, by - ny * head - nx * head * 0.6);
   strokeTwice(ctx, color, 3);
-}
-
-function drawLabel(ctx, x, y, text, color) {
-  const r = 13;
-  const cx = x + r * 1.5, cy = y - r * 1.5; // beside the center so the arrow stays visible
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fillStyle = color;
-  ctx.fill();
-  ctx.lineWidth = 1.5;
-  ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-  ctx.stroke();
-  ctx.fillStyle = '#fff';
-  ctx.font = 'bold 16px system-ui, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, cx, cy + 1);
 }
 
 // ───────────────────────── Setup screen ─────────────────────────
@@ -305,9 +291,12 @@ function runAnalysis() {
     }
     cancelAnalysis();
     if (msg.type === 'error') return showError(`Analysis failed: ${msg.message}`);
+    const g = msg.result.grid;
+    if (!state.boardGrid || state.boardGrid.cols !== g.cols || state.boardGrid.rows !== g.rows) state.placed.clear();
+    state.boardGrid = g;
     state.analysis = msg.result;
     state.analyzedBox = cropped;
-    state.used.clear();
+    state.usedPieces.clear();
     state.skipped.clear();
     showScreen('result');
   };
@@ -320,128 +309,293 @@ function runAnalysis() {
 
 // ───────────────────────── Result screen ─────────────────────────
 
-const pairKey = (s) => `${s.anchor}-${s.mover}`;
+const SIDE_WORDS = { left: 'the piece on its left', right: 'the piece on its right', top: 'the piece above it', bottom: 'the piece below it' };
 
-function remainingSuggestions() {
+/** The current suggestion for the loose pieces in this photo, or null. */
+function currentStep() {
   const a = state.analysis;
-  return a ? a.suggestions.filter((s) => !state.used.has(s.anchor) && !state.used.has(s.mover) && !state.skipped.has(pairKey(s))) : [];
+  if (!a) return null;
+  const excluded = new Set([...state.usedPieces, ...state.skipped]);
+  return nextPlacement({ grid: a.grid, pieces: a.pieces, placed: state.placed, excluded });
 }
-
-const DIRECTION_WORDS = {
-  LEFT: 'on the LEFT side of',
-  RIGHT: 'on the RIGHT side of',
-  ABOVE: 'ABOVE',
-  BELOW: 'BELOW',
-};
 
 /** How far to turn a piece, given where its top currently points in the photo. */
 function turnHint(up) {
   if (!up) return 'orientation unknown';
   const deg = (Math.atan2(up.x, -up.y) * 180) / Math.PI; // clockwise from photo-up
   const rounded = Math.round(deg / 45) * 45;
-  if (Math.abs(deg) < 20) return 'already upright';
+  if (Math.abs(deg) < 20) return 'it is already upright';
   if (Math.abs(rounded) === 180) return 'turn it upside down';
-  return deg > 0 ? `turn about ${Math.abs(rounded)}° counter-clockwise` : `turn about ${Math.abs(rounded)}° clockwise`;
+  return deg > 0 ? `turn it about ${Math.abs(rounded)}° counter-clockwise` : `turn it about ${Math.abs(rounded)}° clockwise`;
 }
 
 function confidenceWord(score) {
   if (score >= 0.5) return 'high';
   if (score >= 0.2) return 'medium';
-  return 'low (double-check before pushing them together)';
+  return 'low (check that it really fits before pressing it in)';
 }
 
-function drawAllPieces(ctx, map) {
-  for (const p of state.analysis.pieces) {
-    const color = state.used.has(p.id) ? 'rgba(160,160,160,0.8)' : p.placement ? 'rgba(255,255,255,0.85)' : 'rgba(255,60,60,0.85)';
-    drawPolygon(ctx, map, p.corners, color, 1.5);
+function listWords(items) {
+  return items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
+/** Map for drawing an image placed at rect {x, y, scale} on a canvas. */
+const rectMap = (r) => ({
+  scale: r.scale,
+  pt: (p) => [r.x + p.x * r.scale, r.y + p.y * r.scale],
+  unmap: (cx, cy) => ({ x: (cx - r.x) / r.scale, y: (cy - r.y) / r.scale }),
+});
+
+/**
+ * Darkens board cells that are not on the board yet; placed cells and the target cell stay bright.
+ * Works in box-image coordinates through `map`.
+ */
+function shadeBoard(ctx, map, target) {
+  const a = state.analysis, box = state.analyzedBox, g = a.grid;
+  const cw = box.width / g.cols, ch = box.height / g.rows;
+  const targetKey = target ? cellKey(target.col, target.row) : null;
+  ctx.beginPath();
+  for (let r = 0; r < g.rows; r++) for (let c = 0; c < g.cols; c++) {
+    const key = cellKey(c, r);
+    if (state.placed.has(key) || key === targetKey) continue;
+    const [x0, y0] = map.pt({ x: c * cw, y: r * ch });
+    const [x1, y1] = map.pt({ x: (c + 1) * cw, y: (r + 1) * ch });
+    ctx.rect(x0, y0, x1 - x0, y1 - y0);
   }
-}
-
-function drawAllPlacements(ctx, map) {
-  for (const p of state.analysis.pieces) {
-    const pl = p.placement;
-    if (!pl) continue;
-    const half = pl.boxCellSize / 2;
-    const [x0, y0] = map.pt({ x: pl.boxCenter.x - half, y: pl.boxCenter.y - half });
-    const [x1, y1] = map.pt({ x: pl.boxCenter.x + half, y: pl.boxCenter.y + half });
-    ctx.strokeStyle = `rgba(255,255,255,${0.3 + 0.7 * pl.confidence})`;
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+  ctx.fillStyle = 'rgba(14, 15, 22, 0.68)';
+  ctx.fill();
+  if (cw * map.scale >= 7) { // grid lines, when cells are big enough to see
+    ctx.beginPath();
+    for (let c = 1; c < g.cols; c++) { const [x, y0] = map.pt({ x: c * cw, y: 0 }); const [, y1] = map.pt({ x: c * cw, y: box.height }); ctx.moveTo(x, y0); ctx.lineTo(x, y1); }
+    for (let r = 1; r < g.rows; r++) { const [x0, y] = map.pt({ x: 0, y: r * ch }); const [x1] = map.pt({ x: box.width, y: r * ch }); ctx.moveTo(x0, y); ctx.lineTo(x1, y); }
+    ctx.strokeStyle = 'rgba(255,255,255,0.13)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
-}
-
-function drawPair(ctx, map, pair, labels) {
-  pair.forEach((p, i) => {
-    const color = i === 0 ? ANCHOR : MOVER;
-    drawPolygon(ctx, map, p.corners, color, 3);
-    if (p.up) drawArrow(ctx, map, p.center, p.up, p.bodySize * 0.42, color);
-    const [cx, cy] = map.pt(p.center);
-    if (labels) {
-      drawLabel(ctx, cx, cy, i === 0 ? 'A' : 'B', color);
-    } else {
-      ctx.beginPath();
-      ctx.arc(cx, cy, Math.max(14, p.bodySize * map.scale * 0.9), 0, Math.PI * 2);
-      strokeTwice(ctx, color, 3);
-    }
-  });
-}
-
-function drawTargets(ctx, map, pair, labels) {
-  pair.forEach((p, i) => {
-    const pl = p.placement, color = i === 0 ? ANCHOR : MOVER;
-    const half = pl.boxCellSize / 2;
-    const [x0, y0] = map.pt({ x: pl.boxCenter.x - half, y: pl.boxCenter.y - half });
-    const [x1, y1] = map.pt({ x: pl.boxCenter.x + half, y: pl.boxCenter.y + half });
+  if (target) {
+    const [x0, y0] = map.pt({ x: target.col * cw, y: target.row * ch });
+    const [x1, y1] = map.pt({ x: (target.col + 1) * cw, y: (target.row + 1) * ch });
     ctx.beginPath();
     ctx.rect(x0, y0, x1 - x0, y1 - y0);
-    strokeTwice(ctx, color, 3);
-    if (labels) drawLabel(ctx, (x0 + x1) / 2, (y0 + y1) / 2, i === 0 ? 'A' : 'B', color);
+    strokeTwice(ctx, MOVER, 3);
+    if (x1 - x0 < 16) { // tiny cells: add a ring so the spot is easy to find
+      ctx.beginPath();
+      ctx.arc((x0 + x1) / 2, (y0 + y1) / 2, 16, 0, Math.PI * 2);
+      strokeTwice(ctx, MOVER, 2.5);
+    }
+  }
+}
+
+/** Highlights the piece to place; dims pieces already used; optionally outlines all the others. */
+function markPieces(ctx, map, piece, ring) {
+  for (const p of state.analysis.pieces) {
+    if (state.usedPieces.has(p.id)) {
+      // Already on the board: grey it out (the photo still shows it on the table).
+      const c = p.center, s = 1.45;
+      ctx.beginPath();
+      p.corners.forEach((q, i) => { const [x, y] = map.pt({ x: c.x + (q.x - c.x) * s, y: c.y + (q.y - c.y) * s }); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(120,120,130,0.75)';
+      ctx.fill();
+    } else if (state.showAll && p !== piece) {
+      drawPolygon(ctx, map, p.corners, p.placement ? 'rgba(255,255,255,0.85)' : 'rgba(255,60,60,0.85)', 1.5);
+    }
+  }
+  if (!piece) return;
+  drawPolygon(ctx, map, piece.corners, MOVER, 3);
+  if (piece.up) drawArrow(ctx, map, piece.center, piece.up, piece.bodySize * 0.42, MOVER);
+  if (ring) {
+    const [cx, cy] = map.pt(piece.center);
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringRadius(piece, map), 0, Math.PI * 2);
+    strokeTwice(ctx, MOVER, 3);
+  }
+}
+
+const ringRadius = (piece, map) => Math.max(16, piece.bodySize * map.scale * 0.95);
+
+/** Big curved arrow between two canvas points; `startGap`/`endGap` keep it off the marked spots. */
+function drawBigArrow(ctx, [x0, y0], [x1, y1], startGap, endGap) {
+  const dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy);
+  if (len < startGap + endGap + 10) return;
+  const ux = dx / len, uy = dy / len;
+  const sx = x0 + ux * startGap, sy = y0 + uy * startGap;
+  const ex = x1 - ux * endGap, ey = y1 - uy * endGap;
+  // Bend sideways a little so the arrow doesn't hide the straight line between the images.
+  const bend = Math.min(80, len * 0.18);
+  const cx = (sx + ex) / 2 - uy * bend, cy = (sy + ey) / 2 + ux * bend;
+  ctx.beginPath();
+  ctx.moveTo(sx, sy);
+  ctx.quadraticCurveTo(cx, cy, ex, ey);
+  strokeTwice(ctx, MOVER, 5);
+  // Head, aligned with the curve's end tangent.
+  const tx = ex - cx, ty = ey - cy, tl = Math.hypot(tx, ty) || 1;
+  const hx = tx / tl, hy = ty / tl, head = 18;
+  ctx.beginPath();
+  ctx.moveTo(ex - hx * head - hy * head * 0.6, ey - hy * head + hx * head * 0.6);
+  ctx.lineTo(ex, ey);
+  ctx.lineTo(ex - hx * head + hy * head * 0.6, ey - hy * head - hx * head * 0.6);
+  strokeTwice(ctx, MOVER, 5);
+}
+
+/**
+ * The composite: your board (box picture with only placed cells bright) and the loose-pieces photo,
+ * side by side on wide screens or stacked on phones, with an arrow from the piece to its spot.
+ */
+function drawComposite(canvas, step) {
+  const box = state.analyzedBox, pieces = state.pieces, g = state.analysis.grid;
+  const cssW = canvas.clientWidth || canvas.parentElement.clientWidth;
+  const pad = 12, caption = 24;
+  const wide = cssW >= 640;
+  const colW = wide ? (cssW - 3 * pad) / 2 : cssW - 2 * pad;
+  const maxH = wide ? 460 : 380;
+  const fit = (img) => {
+    const scale = Math.min(colW / img.width, maxH / img.height);
+    return { w: img.width * scale, h: img.height * scale, scale };
+  };
+  const fb = fit(box), fp = fit(pieces);
+  let rb, rp, cssH;
+  if (wide) {
+    const rowH = Math.max(fb.h, fp.h);
+    rb = { ...fb, x: pad + (colW - fb.w) / 2, y: pad + caption + (rowH - fb.h) / 2 };
+    rp = { ...fp, x: 2 * pad + colW + (colW - fp.w) / 2, y: pad + caption + (rowH - fp.h) / 2 };
+    cssH = pad + caption + rowH + pad;
+  } else {
+    rb = { ...fb, x: pad + (colW - fb.w) / 2, y: pad + caption };
+    rp = { ...fp, x: pad + (colW - fp.w) / 2, y: rb.y + fb.h + pad * 2 + caption };
+    cssH = rp.y + fp.h + pad;
+  }
+  canvas.style.height = `${cssH}px`;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const css = getComputedStyle(document.documentElement);
+  ctx.fillStyle = css.getPropertyValue('--card').trim() || '#fff';
+  ctx.fillRect(0, 0, cssW, cssH);
+
+  ctx.fillStyle = css.getPropertyValue('--text').trim() || '#000';
+  ctx.font = '600 15px system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(`Your board (${state.placed.size} of ${g.cols * g.rows} placed)`, rb.x, rb.y - 8);
+  ctx.fillText('Loose pieces', rp.x, rp.y - 8);
+
+  const mb = rectMap(rb), mp = rectMap(rp);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(box, rb.x, rb.y, rb.w, rb.h);
+  shadeBoard(ctx, mb, step?.piece.placement);
+  ctx.drawImage(pieces, rp.x, rp.y, rp.w, rp.h);
+  markPieces(ctx, mp, step?.piece, true);
+
+  if (step) {
+    const t = step.piece.placement;
+    const cw = box.width / g.cols, ch = box.height / g.rows;
+    const target = mb.pt({ x: (t.col + 0.5) * cw, y: (t.row + 0.5) * ch });
+    const cellR = Math.max(16, (cw * mb.scale) / 2) + 6;
+    drawBigArrow(ctx, mp.pt(step.piece.center), target, ringRadius(step.piece, mp) + 4, cellR);
+  }
+}
+
+function renderBoardEditor() {
+  const canvas = $('boardEdit');
+  canvas.hidden = !state.editingBoard;
+  $('editHint').hidden = !state.editingBoard;
+  $('editBoard').textContent = state.editingBoard ? 'Done marking' : 'Mark pieces already placed';
+  canvas.classList.toggle('editing', state.editingBoard);
+  if (state.editingBoard) boardEditMap = drawFitted(canvas, state.analyzedBox, null, 480, (ctx, map) => shadeBoard(ctx, map, null));
+}
+
+let boardEditMap = null;
+let boardPaint = null; // 'add' | 'remove' while dragging
+
+function setupBoardEditor() {
+  const canvas = $('boardEdit');
+  const cellAt = (e) => {
+    if (!boardEditMap || !state.analysis) return null;
+    const r = canvas.getBoundingClientRect();
+    const p = boardEditMap.unmap(e.clientX - r.left, e.clientY - r.top);
+    const g = state.analysis.grid, box = state.analyzedBox;
+    const col = Math.floor((p.x / box.width) * g.cols), row = Math.floor((p.y / box.height) * g.rows);
+    return col >= 0 && row >= 0 && col < g.cols && row < g.rows ? cellKey(col, row) : null;
+  };
+  const paint = (key) => {
+    if (!key) return;
+    const had = state.placed.has(key);
+    if (boardPaint === 'add' && !had) state.placed.add(key);
+    else if (boardPaint === 'remove' && had) state.placed.delete(key);
+    else return;
+    renderBoardEditor();
+  };
+  canvas.addEventListener('pointerdown', (e) => {
+    const key = cellAt(e);
+    if (!state.editingBoard || !key) return;
+    boardPaint = state.placed.has(key) ? 'remove' : 'add';
+    canvas.setPointerCapture(e.pointerId);
+    paint(key);
+    e.preventDefault();
   });
+  canvas.addEventListener('pointermove', (e) => { if (boardPaint) paint(cellAt(e)); });
+  const end = () => { if (boardPaint) { boardPaint = null; renderResult(); } };
+  canvas.addEventListener('pointerup', end);
+  canvas.addEventListener('pointercancel', end);
 }
 
 function renderResult() {
   const a = state.analysis, pieces = state.pieces, box = state.analyzedBox;
   if (!a || !pieces || !box) return;
-  $('foundCount').textContent = `${a.pieces.length} pieces found`;
+  const g = a.grid;
+  const loose = a.pieces.filter((p) => !state.usedPieces.has(p.id)).length;
+  $('foundCount').textContent = `${a.pieces.length} pieces found · ${loose} still loose`;
   $('warnings').replaceChildren(...a.warnings.map((w) => Object.assign(document.createElement('p'), { className: 'warning', textContent: w })));
+  $('boardInfo').textContent = `${state.placed.size} of ${g.cols * g.rows} pieces on your board (${g.cols} columns × ${g.rows} rows).`;
+  renderBoardEditor();
 
-  const remaining = remainingSuggestions();
-  const s = remaining[0];
-  $('suggestion').hidden = !s;
-  $('noSuggestion').hidden = !!s;
+  const step = currentStep();
+  $('suggestion').hidden = !step;
+  $('noSuggestion').hidden = !!step;
 
-  if (!s) {
-    const best = a.pieces.filter((p) => p.placement && !state.used.has(p.id)).sort((x, y) => y.placement.confidence - x.placement.confidence)[0];
-    $('noSuggestionText').textContent = best
-      ? `None of the remaining loose pieces seem to be neighbours. The most certain single piece is #${best.id + 1}: row ${best.placement.row + 1}, column ${best.placement.col + 1}. Take a new photo with more pieces to find more pairs.`
-      : 'Take a new photo with more pieces (or in better light) to get suggestions.';
-    drawFitted($('piecesAll'), pieces, null, 320, drawAllPieces);
+  if (!step) {
+    $('noSuggestionText').textContent = state.placed.size === 0
+      ? 'No corner pieces were found among these loose pieces. Corners have two straight edges: include some in your next photo. If you have already started the puzzle, use "Mark pieces already placed" below so suggestions can connect to them.'
+      : 'None of these loose pieces seem to connect to your board yet. Take a new photo with more pieces, or check that your board below matches the table.';
+    drawComposite($('compositeEmpty'), null);
     return;
   }
 
-  const A = a.pieces[s.anchor], B = a.pieces[s.mover];
-  const pa = A.placement, pb = B.placement, g = a.grid;
-  $('joinText').innerHTML = `<span class="dot b"></span>B goes ${DIRECTION_WORDS[s.direction]} <span class="dot a"></span>A`;
-  $('turnText').textContent = `Turn both pieces so their arrows point up (toward the top of the picture). A: ${turnHint(A.up)}. B: ${turnHint(B.up)}.`;
-  const edge = [pa, pb].some((p) => p.col === 0 || p.row === 0 || p.col === g.cols - 1 || p.row === g.rows - 1);
-  $('whereText').textContent = `A belongs at row ${pa.row + 1}, column ${pa.col + 1}; B at row ${pb.row + 1}, column ${pb.col + 1} (of ${g.rows} rows × ${g.cols} columns).${edge ? ' These are edge pieces.' : ''}`;
-  $('confText').textContent = `Confidence: ${confidenceWord(s.score)}`;
+  const p = step.piece, pl = p.placement;
+  if (step.kind === 'corner') {
+    $('stepTitle').textContent = state.placed.size === 0 ? 'Start with a corner' : 'Start a new corner';
+    $('placeText').textContent = `Put the highlighted piece in the ${cornerName(g, pl.col, pl.row)} corner of your board.`;
+  } else {
+    $('stepTitle').textContent = 'Place this piece';
+    const sides = step.neighbours.map((n) => SIDE_WORDS[n.side]);
+    $('placeText').textContent = `Put the highlighted piece next to ${listWords(sides)}.`;
+  }
+  $('turnText').textContent = `Turn it so the small arrow on the piece points to the top of the picture: ${turnHint(p.up)}.`;
+  $('whereText').textContent = `Row ${pl.row + 1}, column ${pl.col + 1} of ${g.rows} × ${g.cols}.${isEdge(g, pl.col, pl.row) && step.kind !== 'corner' ? ' It is an edge piece.' : ''}`;
+  $('confText').textContent = `Confidence: ${confidenceWord(step.score)}`;
 
-  const pair = [A, B];
-  const zoom = boundsOf(pair.flatMap((p) => p.corners), A.bodySize, pieces.width, pieces.height);
-  drawFitted($('piecesZoom'), pieces, zoom, 320, (ctx, map) => drawPair(ctx, map, pair, true));
-  drawFitted($('piecesFull'), pieces, null, 260, (ctx, map) => {
-    if (state.showAll) drawAllPieces(ctx, map);
-    drawPair(ctx, map, pair, false);
-  });
-  const cells = boundsOf([pa.boxCenter, pb.boxCenter], pa.boxCellSize * 3, box.width, box.height);
-  drawFitted($('boxZoom'), box, cells, 300, (ctx, map) => drawTargets(ctx, map, pair, true));
-  drawFitted($('boxFull'), box, null, 240, (ctx, map) => {
-    if (state.showAll) drawAllPlacements(ctx, map);
-    drawTargets(ctx, map, pair, false);
-  });
-  const more = remaining.length - 1;
-  $('remaining').textContent = `${more} more suggestion${more === 1 ? '' : 's'} from this photo.`;
+  drawComposite($('composite'), step);
+  const zoom = boundsOf(p.corners, p.bodySize * 0.9, pieces.width, pieces.height, 1);
+  drawFitted($('pieceZoom'), pieces, zoom, 220, (ctx, map) => markPieces(ctx, map, p, false));
+  const cw = box.width / g.cols, ch = box.height / g.rows;
+  const around = boundsOf([{ x: pl.col * cw, y: pl.row * ch }, { x: (pl.col + 1) * cw, y: (pl.row + 1) * ch }], Math.max(cw, ch) * 2, box.width, box.height, 1);
+  drawFitted($('boardZoom'), box, around, 220, (ctx, map) => shadeBoard(ctx, map, pl));
+}
+
+async function saveComposite() {
+  const blob = await new Promise((resolve) => $('composite').toBlob(resolve, 'image/png'));
+  if (!blob) return;
+  const file = new File([blob], 'puzzle-next-piece.png', { type: 'image/png' });
+  if (navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: 'Next puzzle piece' }); return; } catch { /* cancelled: fall back to download */ }
+  }
+  const url = URL.createObjectURL(blob);
+  const link = Object.assign(document.createElement('a'), { href: url, download: file.name });
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
 // ───────────────────────── Navigation & wiring ─────────────────────────
@@ -483,6 +637,8 @@ function init() {
         if (input.dataset.slot === 'box') {
           state.box = canvas;
           state.crop = { l: 0, t: 0, r: 1, b: 1 };
+          state.placed.clear(); // a new box means a new puzzle
+          state.analysis = null;
           state.editingCrop = false;
         } else {
           state.pieces = canvas;
@@ -507,18 +663,29 @@ function init() {
   $('cancel').addEventListener('click', cancelAnalysis);
   $('backToResult').addEventListener('click', () => showScreen('result'));
   $('back').addEventListener('click', () => showScreen('setup'));
-  $('joined').addEventListener('click', () => {
-    const s = remainingSuggestions()[0];
-    if (s) { state.used.add(s.anchor); state.used.add(s.mover); }
+  $('placed').addEventListener('click', () => {
+    const s = currentStep();
+    if (s) {
+      state.usedPieces.add(s.piece.id);
+      state.placed.add(cellKey(s.piece.placement.col, s.piece.placement.row));
+    }
     renderResult();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
   $('skip').addEventListener('click', () => {
-    const s = remainingSuggestions()[0];
-    if (s) state.skipped.add(pairKey(s));
+    const s = currentStep();
+    if (s) state.skipped.add(s.piece.id);
     renderResult();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
+  $('download').addEventListener('click', saveComposite);
+  $('editBoard').addEventListener('click', () => { state.editingBoard = !state.editingBoard; renderResult(); });
+  $('clearBoard').addEventListener('click', () => {
+    if (state.placed.size && !confirm('Clear all pieces from your board?')) return;
+    state.placed.clear();
+    renderResult();
+  });
+  setupBoardEditor();
   $('showAll').addEventListener('change', (e) => { state.showAll = e.target.checked; renderResult(); });
   $('retake').addEventListener('click', () => {
     state.pieces = null;
