@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A simple jigsaw piece: square body with a knob on the top and right. 108dp adaptive icon canvas. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M36,40 L48,40 A7,7 0 1,1 60,40 L72,40 L72,52 A7,7 0 1,1 72,64 L72,76 L36,76 Z" />
+</vector>
