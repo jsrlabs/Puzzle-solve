@@ -1,0 +1,41 @@
+name: Web app
+
+on:
+  push:
+    paths: ["web/**", ".github/workflows/web.yml"]
+  pull_request:
+    paths: ["web/**"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Solver tests
+        working-directory: web
+        run: npm test
+
+  # Publishes web/ to GitHub Pages from the default branch.
+  # One-time setup: repository Settings -> Pages -> Source: "GitHub Actions".
+  deploy:
+    needs: test
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v4

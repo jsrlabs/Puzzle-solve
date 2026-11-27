@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Puzzle Helper</title>
+  <meta name="description" content="Photograph a jigsaw box and your loose pieces; get told which two pieces to join next.">
+  <meta name="theme-color" content="#3f51b5">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="src/app.js"></script>
+</head>
+<body>
+  <main>
+    <!-- ───────── Setup ───────── -->
+    <section id="setup">
+      <header>
+        <h1>Puzzle Helper</h1>
+        <p class="muted">Photograph the box picture and your loose pieces. The app finds two loose pieces that belong
+          next to each other and shows you how to join them. Everything runs on your device; photos are never uploaded.</p>
+      </header>
+
+      <div class="card">
+        <h2>1. The box picture</h2>
+        <p class="hint">Photograph the picture on the box from straight on, filling the frame. Then adjust the crop so
+          only the puzzle picture is inside.</p>
+        <canvas id="boxPreview" class="preview" hidden></canvas>
+        <div class="row">
+          <label class="btn primary">Take photo<input type="file" accept="image/*" capture="environment" data-slot="box" hidden></label>
+          <label class="btn">Choose photo<input type="file" accept="image/*" data-slot="box" hidden></label>
+          <button id="cropToggle" class="btn" hidden>Adjust crop</button>
+          <button id="cropReset" class="btn text" hidden>Reset crop</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>2. The loose pieces</h2>
+        <p class="hint">Spread pieces picture-side up on a plain surface that contrasts with them (a dark cloth or a
+          sheet of paper). Make sure no pieces touch, and photograph from straight above in good light.</p>
+        <canvas id="piecesPreview" class="preview" hidden></canvas>
+        <div class="row">
+          <label class="btn primary">Take photo<input type="file" accept="image/*" capture="environment" data-slot="pieces" hidden></label>
+          <label class="btn">Choose photo<input type="file" accept="image/*" data-slot="pieces" hidden></label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>3. Puzzle size</h2>
+        <label class="field">Number of pieces
+          <input id="pieceCount" type="number" inputmode="numeric" min="4" max="99999" value="500">
+        </label>
+        <p class="hint">Optional: exact layout, if you know it</p>
+        <div class="row">
+          <label class="field grow">Columns <input id="cols" type="number" inputmode="numeric" min="1" max="999"></label>
+          <label class="field grow">Rows <input id="rows" type="number" inputmode="numeric" min="1" max="999"></label>
+        </div>
+        <p id="gridInfo" class="hint"></p>
+      </div>
+
+      <div id="progress" class="progress" hidden>
+        <p id="progressMsg">Starting…</p>
+        <div class="bar"><div id="progressFill"></div></div>
+        <button id="cancel" class="btn text">Cancel</button>
+      </div>
+      <button id="analyze" class="btn primary big" disabled>Find a matching pair</button>
+      <button id="backToResult" class="btn big" hidden>Back to suggestions</button>
+    </section>
+
+    <!-- ───────── Result ───────── -->
+    <section id="result" hidden>
+      <div class="row spread">
+        <button id="back" class="btn text">‹ Photos</button>
+        <span id="foundCount" class="hint"></span>
+      </div>
+      <div id="warnings"></div>
+
+      <div id="suggestion">
+        <div class="card">
+          <h2 class="big-title">Join these two pieces</h2>
+          <p id="joinText" class="join"></p>
+          <p id="turnText"></p>
+          <p id="whereText" class="hint"></p>
+          <p id="confText" class="hint"></p>
+        </div>
+
+        <h3>Find these pieces</h3>
+        <canvas id="piecesZoom" class="view"></canvas>
+        <p class="hint">Where they are in your photo:</p>
+        <canvas id="piecesFull" class="view"></canvas>
+
+        <h3>Where they go in the picture</h3>
+        <canvas id="boxZoom" class="view"></canvas>
+        <canvas id="boxFull" class="view"></canvas>
+
+        <div class="row">
+          <button id="joined" class="btn primary grow">Joined! Next</button>
+          <button id="skip" class="btn grow">Doesn't fit / skip</button>
+        </div>
+        <p id="remaining" class="hint"></p>
+      </div>
+
+      <div id="noSuggestion" hidden>
+        <div class="card">
+          <h2>No more matching pairs in this photo</h2>
+          <p id="noSuggestionText"></p>
+        </div>
+        <canvas id="piecesAll" class="view"></canvas>
+      </div>
+
+      <label class="switch"><input id="showAll" type="checkbox"> Show every detected piece</label>
+      <button id="retake" class="btn big">New photo of remaining pieces</button>
+    </section>
+  </main>
+
+  <dialog id="errorDialog">
+    <h2>Something went wrong</h2>
+    <p id="errorText"></p>
+    <form method="dialog"><button class="btn primary">OK</button></form>
+  </dialog>
+</body>
+</html>
