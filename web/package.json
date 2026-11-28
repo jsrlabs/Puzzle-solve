@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "npx --yes serve -l 8080 .",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "bench": "node test/bench-matching.js"
   },
   "devDependencies": {
     "jpeg-js": "^0.4.4"
