@@ -35,9 +35,11 @@ The report holds the numbers behind the suggestion, plus small pictures:
 * where it was sent in the box picture, and the whole box picture with that spot marked;
 * the same spot on your table.
 
-The pictures are base64 text, so they can be read from a private repository. Paste the report as the issue description and submit; the app copies it to the clipboard first.
+The pictures are stored as text inside the report, so a single paste carries everything, even on a phone (pasting images into GitHub from a phone browser is unreliable). Paste the report as the issue description and submit; the app copies it to the clipboard first.
 
-A scheduled check picks up new `[Puzzle report]` issues, diagnoses them and comments on the issue. To unpack a report yourself, save the issue text to a file and run `node tools/decode-report.mjs report.md out/`.
+The repository is public, so reports (including those small pictures) are public too.
+
+To get reports diagnosed, ask Claude in a session with access to this repository to "diagnose the new puzzle reports", or run `/diagnose-reports`. The procedure is in `.claude/skills/diagnose-reports/SKILL.md`. It only looks at issues opened by the repository owner, and posts one diagnosis comment per new report. To unpack a report yourself, save the issue text to a file and run `node tools/decode-report.mjs report.md out/`.
 
 ## Getting good results
 
