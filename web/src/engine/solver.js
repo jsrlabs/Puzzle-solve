@@ -186,6 +186,8 @@ export function analyze(box, pieces, layout, progress = () => {}, params = DEFAU
       center: { x: p.cx * toOriginal, y: p.cy * toOriginal },
       bodySize: bodyPx * toOriginal,
       corners,
+      // The piece's actual detected outline, for highlighting exactly what was found.
+      outline: p.outline.map(([x, y]) => ({ x: (x + 0.5) * toOriginal, y: (y + 0.5) * toOriginal })),
       up,
       placement,
     };

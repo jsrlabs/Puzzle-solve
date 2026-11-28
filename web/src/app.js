@@ -435,23 +435,26 @@ function shadeBoard(ctx, map, target) {
   }
 }
 
+/** A piece's detected outline (older results only have the body square). */
+const shapeOf = (p) => (p.outline?.length > 2 ? p.outline : p.corners);
+
 /** Highlights the piece to place; dims pieces already used; optionally outlines all the others. */
 function markPieces(ctx, map, piece, ring) {
   for (const p of state.analysis.pieces) {
     if (state.usedPieces.has(p.id)) {
       // Already on the board: grey it out (the photo still shows it on the table).
-      const c = p.center, s = 1.45;
       ctx.beginPath();
-      p.corners.forEach((q, i) => { const [x, y] = map.pt({ x: c.x + (q.x - c.x) * s, y: c.y + (q.y - c.y) * s }); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      shapeOf(p).forEach((q, i) => { const [x, y] = map.pt(q); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
       ctx.closePath();
-      ctx.fillStyle = 'rgba(120,120,130,0.75)';
+      ctx.fillStyle = 'rgba(120,120,130,0.8)';
       ctx.fill();
     } else if (state.showAll && p !== piece) {
-      drawPolygon(ctx, map, p.corners, p.placement ? 'rgba(255,255,255,0.85)' : 'rgba(255,60,60,0.85)', 1.5);
+      drawPolygon(ctx, map, shapeOf(p), p.placement ? 'rgba(255,255,255,0.85)' : 'rgba(255,60,60,0.85)', 1.5);
     }
   }
   if (!piece) return;
-  drawPolygon(ctx, map, piece.corners, MOVER, 3);
+  // Trace the piece's real outline, so it's clear exactly which piece is meant.
+  drawPolygon(ctx, map, shapeOf(piece), MOVER, 2.5);
   if (piece.up) drawArrow(ctx, map, piece.center, piece.up, piece.bodySize * 0.42, MOVER);
   if (ring) {
     const [cx, cy] = map.pt(piece.center);
@@ -651,7 +654,7 @@ function renderResult() {
   $('confText').textContent = `Confidence: ${confidenceWord(step.score)}`;
 
   drawComposite($('composite'), step);
-  const zoom = boundsOf(p.corners, p.bodySize * 0.9, pieces.width, pieces.height, 1);
+  const zoom = boundsOf(shapeOf(p), p.bodySize * 0.7, pieces.width, pieces.height, 1);
   drawFitted($('pieceZoom'), pieces, zoom, 220, (ctx, map) => markPieces(ctx, map, p, false));
   const rc = cellRect(pl.col, pl.row);
   const around = boundsOf([rc, { x: rc.x + rc.w, y: rc.y + rc.h }], Math.max(rc.w, rc.h) * 2, box.width, box.height, 1);
