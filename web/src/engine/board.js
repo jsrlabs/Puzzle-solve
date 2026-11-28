@@ -37,19 +37,21 @@ function ncc(a, b) {
 }
 
 /**
- * Grid suggested by the board's size in the photo: the layout with about `count` pieces whose
- * columns/rows best match the board measured in piece widths.
+ * Layout suggested by the assembled puzzle in the photo. Pieces are close to square, so the board's shape
+ * (width / height) pins down columns / rows precisely; the piece size measured from loose pieces (accurate to
+ * only a few percent) sets the overall scale, and the advertised piece count breaks ties.
  */
 export function gridFromBoard(quad, bodyPx, count) {
   const { w, h } = quadSize(quad);
-  const ec = w / bodyPx, er = h / bodyPx;
+  const ec = w / bodyPx, er = h / bodyPx, aspect = w / h;
   let best = null;
   for (let cols = Math.max(2, Math.floor(ec * 0.8)); cols <= Math.ceil(ec * 1.2); cols++) {
     for (let rows = Math.max(2, Math.floor(er * 0.8)); rows <= Math.ceil(er * 1.2); rows++) {
       const countErr = count ? Math.abs(cols * rows - count) / count : 0;
-      if (count && countErr > 0.06) continue;
-      // The advertised count only breaks ties: "1000 pieces" is often 38 x 27 = 1026.
-      const err = Math.abs(Math.log(cols / ec)) + Math.abs(Math.log(rows / er)) + 0.3 * countErr;
+      if (count && countErr > 0.08) continue;
+      const shapeErr = Math.abs(Math.log(cols / rows / aspect));
+      const sizeErr = Math.abs(Math.log(cols / ec)) + Math.abs(Math.log(rows / er));
+      const err = 3 * shapeErr + 0.5 * sizeErr + 0.3 * countErr;
       if (!best || err < best.err) best = { cols, rows, err };
     }
   }
@@ -358,3 +360,13 @@ export function boardMask(board, grid, cell, w, h) {
   return mask;
 }
 
+
+/** Is photo point (x, y) (board detection coordinates) on a placed piece, including its knobs? */
+export function onBoard(board, cell, x, y) {
+  const p = applyH(board.Hinv, x, y);
+  const u = p.x / cell, v = p.y / cell, knob = 0.3;
+  for (let r = Math.floor(v - knob); r <= Math.floor(v + knob); r++) {
+    for (let c = Math.floor(u - knob); c <= Math.floor(u + knob); c++) if (board.placed.has(`${c},${r}`)) return true;
+  }
+  return false;
+}

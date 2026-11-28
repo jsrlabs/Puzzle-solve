@@ -6,7 +6,7 @@ import { cellKey, cornerName, isEdge, nextPlacement } from './engine/planner.js'
 import { detectPictureQuad } from './engine/quad.js';
 import { gridFromPieceCount } from './engine/solver.js';
 
-const MAX_IMAGE_DIM = 2400;
+const MAX_IMAGE_DIM = 4096; // full resolution for typical phone photos (12 MP)
 const MOVER = '#ff2d87';
 
 const $ = (id) => document.getElementById(id);
@@ -284,7 +284,7 @@ function updateGridInfo() {
 // ───────────────────────── Running the solver ─────────────────────────
 
 let worker = null;
-let busy = false;
+let busy = false; // the worker is analysing (initial run or looking at more of the photo)
 let jobId = 0;
 
 function cancelAnalysis() {
@@ -293,6 +293,13 @@ function cancelAnalysis() {
   busy = false;
   $('progress').hidden = true;
   updateGridInfo();
+}
+
+/** Progress from the worker: on the setup screen for the first run, on the result screen when scanning more. */
+function showProgress(fraction, message) {
+  const onResult = !$('result').hidden;
+  $(onResult ? 'scanMsg' : 'progressMsg').textContent = message;
+  $(onResult ? 'scanFill' : 'progressFill').style.width = `${Math.round(fraction * 100)}%`;
 }
 
 function runAnalysis() {
@@ -306,35 +313,54 @@ function runAnalysis() {
   const id = ++jobId;
   busy = true;
   $('progress').hidden = false;
-  $('progressMsg').textContent = 'Starting…';
-  $('progressFill').style.width = '0%';
+  showProgress(0, 'Starting…');
   updateGridInfo();
   worker.onmessage = (e) => {
     const msg = e.data;
-    if (msg.id !== id) return;
-    if (msg.type === 'progress') {
-      $('progressMsg').textContent = msg.message;
-      $('progressFill').style.width = `${Math.round(msg.fraction * 100)}%`;
-      return;
+    if (msg.id !== jobId) return;
+    if (msg.type === 'progress') return showProgress(msg.fraction, msg.message);
+    busy = false;
+    $('progress').hidden = true;
+    updateGridInfo();
+    if (msg.type === 'error') {
+      worker?.terminate();
+      worker = null;
+      return showError(`Analysis failed: ${msg.message}`);
     }
-    cancelAnalysis();
-    if (msg.type === 'error') return showError(`Analysis failed: ${msg.message}`);
     const g = msg.result.grid;
-    if (!state.boardGrid || state.boardGrid.cols !== g.cols || state.boardGrid.rows !== g.rows) state.placed.clear();
-    state.boardGrid = g;
+    if (msg.kind === 'start') {
+      if (!state.boardGrid || state.boardGrid.cols !== g.cols || state.boardGrid.rows !== g.rows) state.placed.clear();
+      state.boardGrid = g;
+      state.analyzedBox = cropped;
+      state.usedPieces.clear();
+      state.skipped.clear();
+    }
     // Cells the app saw already assembled in the photo.
     for (const key of msg.result.board?.placed ?? []) state.placed.add(key);
     state.analysis = msg.result;
-    state.analyzedBox = cropped;
-    state.usedPieces.clear();
-    state.skipped.clear();
-    showScreen('result');
+    if (msg.kind === 'start') showScreen('result');
+    else renderResult();
   };
   worker.onerror = (e) => {
     cancelAnalysis();
     showError(`Analysis failed: ${e.message || 'the background worker crashed (the photos may be too large).'}`);
   };
-  worker.postMessage({ id, box, pieces, grid }, [box.data.buffer, pieces.data.buffer]);
+  // The worker gets the full-resolution photos; it scans the table photo in sections and stops at the first
+  // section that gives a good next piece.
+  worker.postMessage({ type: 'start', id, box, pieces, grid, placed: [...state.placed], excluded: [] }, [box.data.buffer, pieces.data.buffer]);
+}
+
+/** Parts of the table photo not looked at yet. */
+const sectionsLeft = () => (state.analysis?.scan ? state.analysis.scan.total - state.analysis.scan.scanned : 0);
+
+/** Asks the worker to look at more sections of the photo (keeps going until it finds a piece to place). */
+function scanMore() {
+  if (!worker || busy || sectionsLeft() <= 0) return;
+  busy = true;
+  jobId++;
+  showProgress(0, 'Looking at more of your photo…');
+  renderResult();
+  worker.postMessage({ type: 'more', id: jobId, placed: [...state.placed], excluded: [...state.usedPieces, ...state.skipped] });
 }
 
 // ───────────────────────── Result screen ─────────────────────────
@@ -626,11 +652,29 @@ function renderResult() {
   $('boardInfo').textContent = `${state.placed.size} of ${g.cols * g.rows} pieces on your board (${g.cols} columns × ${g.rows} rows).${seen}`;
   renderBoardEditor();
 
+  // How much of the photo has been looked at; more is scanned automatically when the suggestions run out.
+  const left = sectionsLeft();
+  const sc = a.scan;
+  $('scanStatus').hidden = !sc;
+  if (sc) {
+    $('scanInfo').textContent = left > 0
+      ? `Looked at ${sc.scanned} of ${sc.total} parts of your photo so far.`
+      : `Looked at all ${sc.total} parts of your photo.`;
+    $('scanBar').hidden = !busy;
+    $('scanMore').hidden = busy || left <= 0;
+  }
+
   const step = currentStep();
+  if (!step && left > 0 && !busy) { scanMore(); return; }
   $('suggestion').hidden = !step;
   $('noSuggestion').hidden = !!step;
 
   if (!step) {
+    if (busy) {
+      $('noSuggestionText').textContent = 'Looking at more of your photo for a piece that fits…';
+      drawComposite($('compositeEmpty'), null);
+      return;
+    }
     $('noSuggestionText').textContent = state.placed.size === 0
       ? 'No corner pieces were found among these loose pieces. Corners have two straight edges: include some in your next photo. If you have already started the puzzle, use "Mark pieces already placed" below so suggestions can connect to them.'
       : 'None of these loose pieces seem to connect to your board yet. Take a new photo with more pieces, or check that your board below matches the table.';
@@ -757,6 +801,7 @@ function init() {
   $('cancel').addEventListener('click', cancelAnalysis);
   $('backToResult').addEventListener('click', () => showScreen('result'));
   $('back').addEventListener('click', () => showScreen('setup'));
+  $('scanMore').addEventListener('click', scanMore);
   $('placed').addEventListener('click', () => {
     const s = currentStep();
     if (s) {

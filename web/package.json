@@ -10,6 +10,7 @@
     "bench": "node test/bench-matching.js"
   },
   "devDependencies": {
+    "@techstark/opencv-js": "^4.10.0-release.1",
     "jpeg-js": "^0.4.4"
   }
 }

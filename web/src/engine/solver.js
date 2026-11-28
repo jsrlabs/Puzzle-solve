@@ -1,15 +1,18 @@
 // Entry point of the solver: box picture + photo of the table (loose pieces, maybe the partly built puzzle)
 // -> where each loose piece goes, which cells are already placed. Pure JavaScript; runs in a Web Worker or Node.
 
-import { boardMask, detectBoard, fromBox, gridFromBoard, IDENTITY_AFFINE } from './board.js';
+import { detectBoard, fromBox, gridFromBoard, IDENTITY_AFFINE, onBoard } from './board.js';
 import { applyH } from './geometry.js';
 import { LabImage, median } from './images.js';
 import { PieceLocator } from './locator.js';
+import { nextPlacement } from './planner.js';
 import { detectPictureQuad } from './quad.js';
 import { inMask, segment } from './segmenter.js';
 
 export const DEFAULT_PARAMS = Object.freeze({
-  piecesMaxDim: 2400, // longest side the pieces photo is reduced to
+  overviewMaxDim: 2400, // reduced copy of the photo used to find the board and plan the sections
+  sectionPx: 1600, // the full-resolution photo is scanned in sections about this size
+  stopScore: 0.25, // stop scanning sections once a piece to place next scores this well
   cellPx: 16, // pixels per puzzle cell in the internal box picture
   sampleGrid: 12, // samples per side taken from each piece body
   sampleSpan: 0.8, // fraction of the body that is sampled (avoids cut edges)
@@ -19,6 +22,10 @@ export const DEFAULT_PARAMS = Object.freeze({
   minPieceAreaRatio: 0.35,
   maxPieceAreaRatio: 2.0,
   lightnessWeight: 0.7,
+  // Second, high-detail look at the best candidates of the coarse search (0 disables it).
+  fineCellPx: 48,
+  fineSampleGrid: 20,
+  fineCandidates: 25,
 });
 
 export const DIRECTIONS = {
@@ -44,173 +51,275 @@ export function gridFromPieceCount(count, aspect) {
 }
 
 /**
+ * Analyses the whole photo at once (all sections). See prepare() and scan() for the incremental version the
+ * app uses.
  * @param {import('./images.js').RgbaImage} box the box picture, cropped to just the puzzle image
- * @param {import('./images.js').RgbaImage} pieces photo of loose pieces on a plain contrasting surface. It may
- *   also show the partly assembled puzzle: it is detected and its cells reported as placed.
+ * @param {import('./images.js').RgbaImage} photo the table: loose pieces on a plain mat, and maybe the partly
+ *   assembled puzzle (detected, and its cells reported as placed)
  * @param {{cols:number, rows:number, pieceCount?:number, exact?:boolean}} layout the grid; unless `exact`,
  *   it may be corrected from the size of the assembled puzzle in the photo (using pieceCount).
  * @param {(fraction:number, message:string) => void} [progress]
  */
-export function analyze(box, pieces, layout, progress = () => {}, params = DEFAULT_PARAMS) {
-  const warnings = [];
+export function analyze(box, photo, layout, progress = () => {}, params = DEFAULT_PARAMS) {
+  const session = prepare(box, photo, layout, (f, m) => progress(f * 0.4, m), params);
+  return scan(session, { stopScore: Infinity }, (f, m) => progress(0.4 + f * 0.6, m));
+}
+
+/**
+ * Step 1: a quick look at a reduced copy of the whole photo: background, roughly where loose pieces are, the
+ * assembled puzzle and the layout. Also splits the full-resolution photo into overlapping sections (busiest
+ * first) for scan(). Returns a session object.
+ */
+export function prepare(box, photo, layout, progress = () => {}, params = DEFAULT_PARAMS) {
   const cell = params.cellPx;
   let grid = { cols: layout.cols, rows: layout.rows };
+  const warnings = [];
 
-  progress(0.02, 'Finding pieces');
-  const small = pieces.downscaleToMax(params.piecesMaxDim);
-  const toOriginal = pieces.width / small.width;
-  const piecesLab = LabImage.from(small);
-  const seg = segment(piecesLab, params);
-  if (seg.pieces.length === 0) {
-    warnings.push('No pieces found. Lay pieces picture-side up on a plain surface that contrasts with them.');
-    return { grid, pieces: [], suggestions: [], warnings, board: null };
+  progress(0.05, 'Looking at the whole photo');
+  const ov = photo.downscaleToMax(params.overviewMaxDim);
+  const toFull = photo.width / ov.width; // full-resolution pixels per overview pixel
+  const ovLab = LabImage.from(ov);
+  const ovSeg = segment(ovLab, params);
+  const background = ovSeg.background;
+
+  // Sections of the full-resolution photo. Each piece belongs to the section whose core holds its center; a
+  // section extends past its core by more than a piece's reach, so every piece lies whole inside its section.
+  const ovBody = ovSeg.pieces.length ? median(ovSeg.pieces.map((p) => p.bodySize)) : Math.min(ov.width, ov.height) / 20;
+  const margin = Math.ceil(1.4 * ovBody * toFull);
+  const nx = Math.max(1, Math.ceil(photo.width / params.sectionPx)), ny = Math.max(1, Math.ceil(photo.height / params.sectionPx));
+  const tiles = [];
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const core = { x0: Math.round((i * photo.width) / nx), y0: Math.round((j * photo.height) / ny), x1: Math.round(((i + 1) * photo.width) / nx), y1: Math.round(((j + 1) * photo.height) / ny) };
+    const rect = { x: Math.max(0, core.x0 - margin), y: Math.max(0, core.y0 - margin) };
+    rect.w = Math.min(photo.width, core.x1 + margin) - rect.x;
+    rect.h = Math.min(photo.height, core.y1 + margin) - rect.y;
+    tiles.push({ index: tiles.length, core, rect, estimate: 0 });
   }
-  const bodyPx = median(seg.pieces.map((p) => p.bodySize));
-  // Blur the pieces photo to match the detail level of the reduced box picture.
-  const blurR = Math.max(0, Math.round((1.5 * bodyPx) / cell));
-  const blurred = blurR > 0 ? piecesLab.boxBlur(blurR) : piecesLab;
+  for (const p of ovSeg.pieces) {
+    const x = p.cx * toFull, y = p.cy * toFull;
+    const t = tiles.find((t) => x >= t.core.x0 && x < t.core.x1 && y >= t.core.y0 && y < t.core.y1);
+    if (t) t.estimate++;
+  }
+  const order = tiles.filter((t) => t.estimate > 0).sort((a, b) => b.estimate - a.estimate).map((t) => t.index);
 
-  progress(0.12, 'Looking for the assembled puzzle');
-  const found = detectPictureQuad(small);
+  // Piece size at full resolution, from the busiest section (more precise than the overview).
+  progress(0.25, 'Measuring pieces');
+  let first = null, bodyFull = ovBody * toFull;
+  // Sections reuse the whole photo's background and cutoff, scaled piece size and area.
+  const given = { background, threshold: ovSeg.threshold, typicalArea: ovSeg.typicalArea * toFull * toFull };
+  if (order.length) {
+    first = segmentTile(photo, tiles[order[0]], params, given);
+    if (first.seg.pieces.length) bodyFull = median(first.seg.pieces.map((p) => p.bodySize));
+  }
+  given.body = bodyFull;
+  const bodyOv = bodyFull / toFull;
+
+  progress(0.4, 'Looking for the assembled puzzle');
+  const blurOv = Math.max(0, Math.round((1.5 * bodyOv) / cell));
+  const boardPhoto = ovLab.boxBlur(blurOv + 1);
+  const found = detectPictureQuad(ov);
   const boxLabFor = (g) => LabImage.from(box.downscaleToMax(Math.max(g.cols, g.rows) * cell * 2)).resize(g.cols * cell, g.rows * cell).boxBlur(1);
-  // A little extra blur makes the board alignment tolerant of the box art differing slightly.
   const boardFor = (g, qs, lab, refine) => detectBoard({
-    photo: small, photoLab: blurred.boxBlur(1), boxLab: lab.boxBlur(1), grid: g, cell, quads: qs, background: seg.background, refine,
+    // A little extra blur makes the board alignment tolerant of the box art differing slightly.
+    photo: ov, photoLab: boardPhoto, boxLab: lab.boxBlur(1), grid: g, cell, quads: qs, background, refine,
   });
   let boxLab = boxLabFor(grid);
   const quads = found ? found.candidates.map((c) => c.quad) : [];
-  let board = null;
   if (found && !layout.exact) {
     // The board's size in piece widths tells the real layout (e.g. 38 x 27 rather than 37 x 27 for "1000").
     // Measured on the outline found from edges, before corner fine-tuning (which adapts to the layout it is given).
-    const first = boardFor(grid, quads, boxLab, false);
-    const g = gridFromBoard(first ? first.edgeQuad : found.quad, bodyPx, layout.pieceCount || grid.cols * grid.rows);
+    const firstBoard = boardFor(grid, quads, boxLab, false);
+    const g = gridFromBoard(firstBoard ? firstBoard.edgeQuad : found.quad, bodyOv, layout.pieceCount || grid.cols * grid.rows);
     const boxAspect = box.width / box.height;
     if (g && (g.cols !== grid.cols || g.rows !== grid.rows) && Math.abs(Math.log(g.cols / g.rows / boxAspect)) < 0.12) {
-      progress(0.15, 'Measuring the assembled puzzle');
+      progress(0.6, 'Measuring the assembled puzzle');
       grid = g;
       boxLab = boxLabFor(g);
     }
   }
-  if (found) board = boardFor(grid, quads, boxLab, true);
+  const board = found ? boardFor(grid, quads, boxLab, true) : null;
+
+  progress(0.85, 'Indexing box picture');
+  const locator = new PieceLocator(boxLab, params);
+  if (params.fineCellPx) {
+    const f = params.fineCellPx;
+    locator.setFine(LabImage.from(box.downscaleToMax(Math.max(grid.cols, grid.rows) * f * 2)).resize(grid.cols * f, grid.rows * f).boxBlur(1), f);
+  }
   const workW = grid.cols * cell, workH = grid.rows * cell;
   const affine = board?.affine ?? IDENTITY_AFFINE;
-
-  // Loose pieces: drop anything that is part of the assembled puzzle.
-  let loose = seg.pieces;
+  const sx = box.width / workW, sy = box.height / workH;
+  const boxCells = { x0: affine.tx * sx, y0: affine.ty * sy, cw: cell * affine.sx * sx, ch: cell * affine.sy * sy };
+  const toPhoto = board && ((x, y) => { const q = applyH(board.H, x, y); return { x: q.x * toFull, y: q.y * toFull }; });
+  let boardInfo = null;
   if (board) {
-    const mask = boardMask(board, grid, cell, small.width, small.height);
-    loose = seg.pieces.filter((p) => {
+    const c = toPhoto(workW / 2, workH / 2), t = toPhoto(workW / 2, workH / 2 - cell);
+    const len = Math.hypot(t.x - c.x, t.y - c.y) || 1;
+    boardInfo = {
+      quad: board.quad.map((q) => ({ x: q.x * toFull, y: q.y * toFull })),
+      H: scaleH(board.H, toFull, cell), // puzzle cell units (col, row) -> photo pixels
+      placed: [...board.placed],
+      up: { x: (t.x - c.x) / len, y: (t.y - c.y) / len }, // which way the top of the puzzle faces in the photo
+    };
+  }
+  progress(1, 'Ready');
+  return {
+    params, box, photo, grid, cell, board, boardInfo, boxLab, locator, affine, boxCells, toPhoto, toFull, bodyFull,
+    color: board ? board.color : null, tiles, order, first, given, scanned: [], pieces: [], puzzlePos: [], warnings,
+    clumps: 0, cutOff: 0,
+  };
+}
+
+/** Segments one section of the full-resolution photo (pieces in section coordinates). */
+function segmentTile(photo, tile, params, given) {
+  const { x, y, w, h } = tile.rect;
+  const lab = LabImage.from(photo.crop(x, y, w, h));
+  const edges = { left: x === 0, top: y === 0, right: x + w >= photo.width, bottom: y + h >= photo.height };
+  return { lab, seg: segment(lab, params, null, edges, given) };
+}
+
+/**
+ * Step 2: scans sections (busiest first) at full resolution, matching their loose pieces, until a piece that
+ * can be placed next scores at least `stopScore` (or all sections are done). Call again to look further.
+ * @param {{placed?: string[], excluded?: number[], stopScore?: number}} options cells already on the user's
+ *   board and pieces already used or skipped (so they don't count as a find)
+ * @returns the analysis so far: { grid, pieces, suggestions, warnings, board, boxCells, scan }
+ */
+export function scan(session, options = {}, progress = () => {}) {
+  const S = session, { params, grid, cell } = S;
+  const stopScore = options.stopScore ?? params.stopScore;
+  const placed = new Set([...(S.boardInfo?.placed ?? []), ...(options.placed ?? [])]);
+  const excluded = new Set(options.excluded ?? []);
+  const todo = S.order.filter((i) => !S.scanned.includes(i));
+  for (let k = 0; k < todo.length; k++) {
+    const tile = S.tiles[todo[k]];
+    const base = k / todo.length, span = 1 / todo.length;
+    progress(base, `Looking at part ${S.scanned.length + 1} of ${S.order.length} of your photo`);
+    // The busiest section was already segmented by prepare() to measure the pieces.
+    const reuse = S.first && S.order[0] === tile.index;
+    const { lab, seg } = reuse ? S.first : segmentTile(S.photo, tile, params, S.given);
+    if (reuse) S.first = null; // free its memory
+    S.clumps += seg.clumps;
+    S.cutOff += seg.cutOff;
+    const ox = tile.rect.x, oy = tile.rect.y;
+    // Pieces of this section: center in its core, not part of the assembled puzzle.
+    const pieces = seg.pieces.filter((p) => {
+      const x = p.cx + ox, y = p.cy + oy;
+      if (x < tile.core.x0 || x >= tile.core.x1 || y < tile.core.y0 || y >= tile.core.y1) return false;
+      if (!S.board) return true;
       let inside = 0, total = 0;
-      for (let y = 0; y < p.bboxH; y += 2) for (let x = 0; x < p.bboxW; x += 2) {
-        if (!p.mask[y * p.bboxW + x]) continue;
+      for (let yy = 0; yy < p.bboxH; yy += 3) for (let xx = 0; xx < p.bboxW; xx += 3) {
+        if (!p.mask[yy * p.bboxW + xx]) continue;
         total++;
-        if (mask[(y + p.bboxY) * small.width + x + p.bboxX]) inside++;
+        if (onBoard(S.board, cell, (xx + p.bboxX + ox) / S.toFull, (yy + p.bboxY + oy) / S.toFull)) inside++;
       }
       return inside < total * 0.3;
     });
-  }
-  if (seg.clumps > 0) warnings.push(`${seg.clumps} group(s) of overlapping pieces were skipped. Spread pieces apart so they don't touch.`);
-  if (seg.cutOff > 0) warnings.push(`${seg.cutOff} piece(s) touching the edge of the photo or off the mat were skipped.`);
-  const samples = loose.map((p) => samplePiece(p, blurred, bodyPx, params));
-
-  progress(0.18, 'Indexing box picture');
-  const locator = new PieceLocator(boxLab, params);
-
-  // Color correction: from the assembled puzzle if we found it (exact), otherwise estimated in two passes.
-  let color = board ? board.color : initialColorModel(samples, boxLab);
-  let matches = [];
-  const passes = board ? 1 : 2;
-  for (let pass = 0; pass < passes; pass++) {
-    matches = samples.map((s, i) => {
-      if (i % 4 === 0) progress(0.2 + ((pass + i / samples.length) * 0.78) / passes, passes > 1 ? `Matching pieces (pass ${pass + 1} of 2)` : 'Matching pieces');
-      return locator.locate(s, color);
+    const body = S.bodyFull;
+    const blurR = Math.max(0, Math.round((1.5 * body) / cell));
+    const blurred = blurR > 0 ? lab.boxBlur(blurR) : lab;
+    const samples = pieces.map((p) => samplePiece(p, blurred, body, params));
+    let fine = null;
+    if (params.fineCellPx) {
+      const sharp = lab.boxBlur(Math.max(1, Math.round((1.5 * body) / params.fineCellPx)));
+      fine = pieces.map((p) => samplePiece(p, sharp, body, { ...params, sampleGrid: params.fineSampleGrid }));
+    }
+    // Without an assembled puzzle to calibrate on, estimate the color correction from the first section.
+    if (!S.color) {
+      S.color = initialColorModel(samples, S.boxLab);
+      const trial = samples.map((s) => S.locator.locate(s, S.color));
+      S.color = fitColorModel(samples, trial, S.locator) ?? S.color;
+    }
+    pieces.forEach((p, i) => {
+      if (i % 4 === 0) progress(base + (span * i) / pieces.length, `Matching pieces in part ${S.scanned.length + 1} of ${S.order.length}`);
+      const m = S.locator.locate(samples[i], S.color, fine && fine[i]);
+      S.pieces.push(describePiece(S, p, m, S.pieces.length, ox, oy));
+      S.puzzlePos.push(m && fromBox(S.affine, m.x, m.y));
     });
-    if (pass === 0 && passes > 1) color = fitColorModel(samples, matches, locator) ?? color;
+    S.scanned.push(tile.index);
+    const analysis = result(S);
+    const next = nextPlacement({ grid, pieces: analysis.pieces, placed, excluded });
+    if (next && next.score >= stopScore) return analysis;
   }
+  progress(1, 'Done');
+  return result(S);
+}
 
-  progress(0.98, 'Building suggestions');
-  // Match positions are in box-picture coordinates; convert to the puzzle's own cells.
-  const puzzlePos = matches.map((m) => m && fromBox(affine, m.x, m.y));
+/** A loose piece in photo coordinates, with where it belongs. */
+function describePiece(S, p, m, id, ox, oy) {
+  const { grid, cell, bodyFull, affine, boxCells, toPhoto } = S;
   const cellOf = (v, cells) => Math.min(cells - 1, Math.max(0, Math.floor(v / cell)));
-  const conf = matches.map((m) => m?.confidence ?? 0);
+  const au = [Math.cos(p.angle), Math.sin(p.angle)], av = [-Math.sin(p.angle), Math.cos(p.angle)];
+  const half = bodyFull / 2;
+  const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([su, sv]) => ({
+    x: p.cx + ox + au[0] * su * half + av[0] * sv * half,
+    y: p.cy + oy + au[1] * su * half + av[1] * sv * half,
+  }));
+  let up = null, placement = null;
+  if (m) {
+    // Box "up" is (0,-1); find (u,v) with rot_q(u,v) = (0,-1), then express it in photo coordinates.
+    const [u, v] = [[0, -1], [-1, 0], [0, 1], [1, 0]][m.q & 3];
+    up = { x: au[0] * u + av[0] * v, y: au[1] * u + av[1] * v };
+    const q = fromBox(affine, m.x, m.y);
+    const col = cellOf(q.x, grid.cols), row = cellOf(q.y, grid.rows);
+    placement = {
+      col,
+      row,
+      boxCenter: { x: boxCells.x0 + (col + 0.5) * boxCells.cw, y: boxCells.y0 + (row + 0.5) * boxCells.ch },
+      boxCellSize: (boxCells.cw + boxCells.ch) / 2,
+      photoTarget: toPhoto ? toPhoto((col + 0.5) * cell, (row + 0.5) * cell) : null,
+      confidence: m.confidence,
+      rawConfidence: m.confidence,
+      matchError: m.error,
+    };
+  }
+  return {
+    id,
+    center: { x: p.cx + ox, y: p.cy + oy },
+    bodySize: bodyFull,
+    corners,
+    // The piece's actual detected outline, for highlighting exactly what was found.
+    outline: p.outline.map(([x, y]) => ({ x: x + 0.5 + ox, y: y + 0.5 + oy })),
+    up,
+    placement,
+  };
+}
+
+/** The analysis so far (pieces from all scanned sections). */
+function result(S) {
+  const { grid, cell } = S;
+  const cellOf = (v, cells) => Math.min(cells - 1, Math.max(0, Math.floor(v / cell)));
   // Two pieces claiming the same cell: trust the more confident one.
   const byCell = new Map();
-  puzzlePos.forEach((q, i) => {
-    if (!q) return;
-    const key = cellOf(q.y, grid.rows) * grid.cols + cellOf(q.x, grid.cols);
+  S.pieces.forEach((p, i) => {
+    if (!p.placement) return;
+    p.placement.confidence = p.placement.rawConfidence;
+    const key = p.placement.row * grid.cols + p.placement.col;
     if (!byCell.has(key)) byCell.set(key, []);
     byCell.get(key).push(i);
   });
   for (const list of byCell.values()) {
     if (list.length < 2) continue;
-    const keep = list.reduce((a, b) => (conf[b] > conf[a] ? b : a));
-    for (const i of list) if (i !== keep) conf[i] *= 0.3;
+    const keep = list.reduce((a, b) => (S.pieces[b].placement.rawConfidence > S.pieces[a].placement.rawConfidence ? b : a));
+    for (const i of list) if (i !== keep) S.pieces[i].placement.confidence *= 0.3;
   }
-
-  // Cells in box-image pixels (the affine is an axis-aligned scale + shift).
-  const sx = box.width / workW, sy = box.height / workH;
-  const boxCells = { x0: affine.tx * sx, y0: affine.ty * sy, cw: cell * affine.sx * sx, ch: cell * affine.sy * sy };
-  // Puzzle coordinates -> original photo pixels.
-  const toPhoto = board && ((x, y) => { const q = applyH(board.H, x, y); return { x: q.x * toOriginal, y: q.y * toOriginal }; });
-
-  const detected = loose.map((p, i) => {
-    const m = matches[i];
-    const au = [Math.cos(p.angle), Math.sin(p.angle)], av = [-Math.sin(p.angle), Math.cos(p.angle)];
-    const half = bodyPx / 2;
-    const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([su, sv]) => ({
-      x: (p.cx + au[0] * su * half + av[0] * sv * half) * toOriginal,
-      y: (p.cy + au[1] * su * half + av[1] * sv * half) * toOriginal,
-    }));
-    let up = null;
-    if (m) {
-      // Box "up" is (0,-1); find (u,v) with rot_q(u,v) = (0,-1), then express it in photo coordinates.
-      const [u, v] = [[0, -1], [-1, 0], [0, 1], [1, 0]][m.q & 3];
-      up = { x: au[0] * u + av[0] * v, y: au[1] * u + av[1] * v };
-    }
-    let placement = null;
-    if (m) {
-      const col = cellOf(puzzlePos[i].x, grid.cols), row = cellOf(puzzlePos[i].y, grid.rows);
-      placement = {
-        col,
-        row,
-        boxCenter: { x: boxCells.x0 + (col + 0.5) * boxCells.cw, y: boxCells.y0 + (row + 0.5) * boxCells.ch },
-        boxCellSize: (boxCells.cw + boxCells.ch) / 2,
-        photoTarget: toPhoto ? toPhoto((col + 0.5) * cell, (row + 0.5) * cell) : null,
-        confidence: conf[i],
-        matchError: m.error,
-      };
-    }
-    return {
-      id: i,
-      center: { x: p.cx * toOriginal, y: p.cy * toOriginal },
-      bodySize: bodyPx * toOriginal,
-      corners,
-      // The piece's actual detected outline, for highlighting exactly what was found.
-      outline: p.outline.map(([x, y]) => ({ x: (x + 0.5) * toOriginal, y: (y + 0.5) * toOriginal })),
-      up,
-      placement,
-    };
-  });
-  const unmatched = detected.filter((d) => !d.placement).length;
-  if (unmatched > 0) warnings.push(`${unmatched} piece(s) could not be matched.`);
-  const suggestions = suggestPairs(detected, puzzlePos, cell);
-
-  let boardInfo = null;
-  if (board) {
-    // Corners of every cell in photo pixels, for drawing; and which way is "up" on the board.
-    const c = toPhoto(workW / 2, workH / 2), t = toPhoto(workW / 2, workH / 2 - cell);
-    const len = Math.hypot(t.x - c.x, t.y - c.y) || 1;
-    boardInfo = {
-      quad: board.quad.map((q) => ({ x: q.x * toOriginal, y: q.y * toOriginal })),
-      // Homography puzzle cell units (col, row) -> original photo pixels.
-      H: scaleH(board.H, toOriginal, cell),
-      placed: [...board.placed],
-      up: { x: (t.x - c.x) / len, y: (t.y - c.y) / len },
-    };
-  }
-  progress(1, 'Done');
-  return { grid, pieces: detected, suggestions, warnings, board: boardInfo, boxCells };
+  const warnings = [...S.warnings];
+  if (S.clumps > 0) warnings.push(`${S.clumps} group(s) of touching or overlapping pieces were skipped. Spread pieces apart so they don't touch.`);
+  if (S.cutOff > 0) warnings.push('Pieces touching the edge of the photo or lying off the mat are skipped.');
+  if (S.order.length === 0) warnings.push('No pieces found. Lay pieces picture-side up on a plain surface that contrasts with them.');
+  const pieces = S.pieces.map((p) => ({ ...p, placement: p.placement && { ...p.placement } }));
+  return {
+    grid,
+    pieces,
+    suggestions: suggestPairs(pieces, S.puzzlePos.map((q) => q || { x: 0, y: 0 }), cell),
+    warnings,
+    board: S.boardInfo,
+    boxCells: S.boxCells,
+    scan: {
+      total: S.order.length,
+      scanned: S.scanned.length,
+      sections: S.order.map((i) => ({ ...S.tiles[i].core, done: S.scanned.includes(i) })),
+    },
+  };
 }
 
 /** H maps puzzle work pixels -> analysis photo pixels; return one mapping cell units -> original photo pixels. */

@@ -51,7 +51,7 @@ export class PieceLocator {
    * @param color per-channel gain/offset mapping piece colors onto box colors
    * @returns {{x:number,y:number,q:number,error:number,confidence:number}|null}
    */
-  locate(samples, color) {
+  locate(samples, color, fineSamples = null) {
     const n = samples.u.length;
     if (n < 8) return null;
     const { box, cell, w, h } = this;
@@ -136,12 +136,18 @@ export class PieceLocator {
     // 3. A few distinct locations (non-maximum suppression), refined to single-pixel precision.
     cand.sort((p, q) => p[2] - q[2]);
     const minSep = cell * 0.7;
+    const useFine = this.fine && fineSamples && fineSamples.u.length >= 8;
+    const want = useFine ? this.params.fineCandidates ?? 25 : 5;
     const picked = [];
     for (const c of cand) {
-      if (picked.length >= 5) break;
+      if (picked.length >= want) break;
       if (picked.every((p) => Math.hypot(p[0] - c[0], p[1] - c[1]) >= minSep)) picked.push(c);
     }
-    const refined = picked.map((c) => this.refine(c[0], c[1], samples, cl, ca, cb)).sort((p, q) => p.error - q.error);
+    // 4. With the high-detail second look, the coarse search only nominates candidates; a sharper comparison
+    //    with finer samples decides. Otherwise refine the few best candidates at the coarse level.
+    const refined = useFine
+      ? picked.map((c) => this.fineCheck({ x: c[0], y: c[1], q: 0, error: c[2] }, fineSamples, color)).sort((p, q) => p.error - q.error)
+      : picked.map((c) => this.refine(c[0], c[1], samples, cl, ca, cb)).sort((p, q) => p.error - q.error);
     const best = refined[0];
     const second = refined.length > 1 ? refined[1].error : best.error * 2 + 1;
     const confidence = second <= 0 ? 0 : Math.min(1, Math.max(0, 1 - best.error / second));
@@ -166,6 +172,56 @@ export class PieceLocator {
         }
         e /= n;
         if (e < best.error) best = { x, y, q, error: e };
+      }
+    }
+    return best;
+  }
+
+  /** Enables the high-detail second look: `box` is the box picture at `cell` pixels per puzzle cell. */
+  setFine(box, cell) {
+    this.fine = { box, cell, ratio: cell / this.cell };
+  }
+
+  /**
+   * Re-scores a candidate (coarse coordinates) with high-detail samples: small local search in all four
+   * orientations. Returns the candidate with the fine error (position stays in coarse coordinates).
+   */
+  fineCheck(c, samples, color) {
+    const { box, cell, ratio } = this.fine;
+    const n = samples.u.length, wl = this.params.lightnessWeight;
+    const cl = new Float32Array(n), ca = new Float32Array(n), cb = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      cl[i] = (color.gainL * samples.l[i] + color.offL) * wl;
+      ca[i] = color.gainA * samples.a[i] + color.offA;
+      cb[i] = color.gainB * samples.b[i] + color.offB;
+    }
+    const step = Math.max(1, Math.round(cell * 0.04));
+    const x0 = c.x * ratio, y0 = c.y * ratio;
+    const offsets = [0, 1, 2, 3].map((q) => {
+      const ox = new Float32Array(n), oy = new Float32Array(n);
+      for (let i = 0; i < n; i++) [ox[i], oy[i]] = rot(q, samples.u[i] * cell, samples.v[i] * cell);
+      return [ox, oy];
+    });
+    const err = (q, x, y, limit) => {
+      const [ox, oy] = offsets[q];
+      let e = 0;
+      for (let i = 0; i < n; i++) {
+        const px = x + ox[i], py = y + oy[i];
+        const dl = box.l.sample(px, py) * wl - cl[i], da = box.a.sample(px, py) - ca[i], db = box.b.sample(px, py) - cb[i];
+        e += dl * dl + da * da + db * db;
+        if (e >= limit) return Infinity;
+      }
+      return e / n;
+    };
+    // All four orientations at the candidate itself, then a small local search for the two best.
+    const qs = [0, 1, 2, 3].map((q) => [q, err(q, x0, y0, Infinity)]).sort((p, q) => p[1] - q[1]).slice(0, 2);
+    let best = { ...c, x: c.x, y: c.y, q: qs[0][0], error: qs[0][1] };
+    for (const [q] of qs) {
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        if (!dx && !dy && q === best.q) continue;
+        const x = x0 + dx * step, y = y0 + dy * step;
+        const e = err(q, x, y, best.error * n);
+        if (e < best.error) best = { x: x / ratio, y: y / ratio, q, error: e };
       }
     }
     return best;

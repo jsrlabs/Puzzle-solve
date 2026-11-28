@@ -1,4 +1,4 @@
-// Loads the real photos in /testdata for tests, the way the app does (max 2400 px on the long side).
+// Loads the real photos in /testdata for tests, the way the app does (full resolution, up to 4096 px).
 import { readFileSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import jpeg from 'jpeg-js';
@@ -6,7 +6,7 @@ import { RgbaImage } from '../src/engine/images.js';
 
 export const TESTDATA = new URL('../../testdata/', import.meta.url);
 
-export function loadPhoto(name, maxDim = 2400) {
+export function loadPhoto(name, maxDim = 4096) {
   const raw = jpeg.decode(readFileSync(new URL(name, TESTDATA)), { useTArray: true, maxMemoryUsageInMB: 1024 });
   return new RgbaImage(raw.width, raw.height, raw.data).downscaleToMax(maxDim);
 }

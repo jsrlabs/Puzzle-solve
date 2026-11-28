@@ -11,12 +11,13 @@ import { loadPhoto } from './photos.js';
 const near = (p, q, tol) => Math.hypot(p.x - q.x, p.y - q.y) <= tol;
 
 test('finds and straightens the picture on the box', () => {
-  const photo = loadPhoto('box-hometown-1000.jpg'); // 2400 x 1807
+  const photo = loadPhoto('box-hometown-1000.jpg'); // 4080 x 3072
   const found = detectPictureQuad(photo);
   assert.ok(found, 'picture found');
-  // Hand-checked corners of the printed picture (inside the green frame).
-  const expected = [{ x: 326, y: 255 }, { x: 2092, y: 255 }, { x: 2080, y: 1580 }, { x: 304, y: 1518 }];
-  found.quad.forEach((p, i) => assert.ok(near(p, expected[i], 20), `corner ${i}: ${JSON.stringify(p)}`));
+  // Hand-checked corners of the printed picture (inside the green frame), measured at 2400 px wide.
+  const k = photo.width / 2400;
+  const expected = [{ x: 326, y: 255 }, { x: 2092, y: 255 }, { x: 2080, y: 1580 }, { x: 304, y: 1518 }].map((p) => ({ x: p.x * k, y: p.y * k }));
+  found.quad.forEach((p, i) => assert.ok(near(p, expected[i], 20 * k), `corner ${i}: ${JSON.stringify(p)}`));
 });
 
 test('real table photo: finds the assembled border, its layout, and loose pieces', () => {

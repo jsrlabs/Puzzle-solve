@@ -23,28 +23,42 @@ export function inMask(p, x, y) {
  * @param {import('./images.js').LabImage} img
  * @param {Uint8Array} [exclude] optional mask (1 = ignore, e.g. the already-assembled puzzle)
  */
-export function segment(img, params, exclude = null) {
+export function segment(img, params, exclude = null, photoEdges = ALL_EDGES, given = {}) {
   const w = img.width, h = img.height;
-  const bg = backgroundColor(img);
+  // Which sides of this image are the real photo edge (a section of a bigger photo has cut sides too).
+  const atEdge = (c) => (photoEdges.left && c.minX === 0) || (photoEdges.top && c.minY === 0) ||
+    (photoEdges.right && c.maxX === w - 1) || (photoEdges.bottom && c.maxY === h - 1);
+  const atAnySide = (c) => c.minX === 0 || c.minY === 0 || c.maxX === w - 1 || c.maxY === h - 1;
+  // A section of a bigger photo uses the whole photo's measurements (`given`): its own could be skewed, e.g.
+  // a corner that is mostly table.
+  const bg = given.background ?? backgroundColor(img);
   const dist = backgroundDistance(img, bg);
-  let mask = threshold(dist, noiseLevel(dist), params);
+  const cutoff = given.threshold ?? pickThreshold(dist, noiseLevel(dist), params);
+  let mask = new Uint8Array(dist.data.length);
+  for (let i = 0; i < mask.length; i++) mask[i] = dist.data[i] > cutoff ? 1 : 0;
   if (exclude) for (let i = 0; i < mask.length; i++) if (exclude[i]) mask[i] = 0;
   // Opening removes thin printed lines and specks. (No closing: it would bridge the narrow gaps between
   // neighbouring pieces; cracks inside pieces are handled by hole filling.)
-  const r = Math.max(1, Math.round(Math.min(w, h) / 600));
+  const r = given.body ? Math.max(1, Math.round(given.body * 0.06)) : Math.max(1, Math.round(Math.min(w, h) / 600));
   mask = dilateErode(dilateErode(mask, w, h, r, false), w, h, r, true); // open
   if (exclude) for (let i = 0; i < mask.length; i++) if (exclude[i]) mask[i] = 0;
 
   // Typical piece size from the plain connected components (most loose pieces are not touching).
-  const minArea = Math.max(30, Math.floor(w * h * params.minPieceAreaFraction));
-  const first = components(mask, w, h).filter((c) => c.area >= minArea && !c.touches);
-  if (first.length === 0) return { pieces: [], clumps: 0, cutOff: 0 };
-  const typical = median(first.map((c) => c.area));
+  let minArea = Math.max(30, Math.floor(w * h * params.minPieceAreaFraction));
+  let typical = given.typicalArea;
+  if (typical) minArea = Math.max(30, typical * 0.2);
+  else {
+    const first = components(mask, w, h).filter((c) => c.area >= minArea && !atAnySide(c));
+    if (first.length === 0) return { pieces: [], clumps: 0, cutOff: 0, background: bg, threshold: cutoff };
+    typical = median(first.map((c) => c.area));
+  }
   mask = fillSmallHoles(mask, w, h, typical * 0.25);
 
-  const regions = splitTouching(mask, w, h, typical);
-  const result = classify(regions, w, h, params, minArea);
+  const regions = splitTouching(mask, w, h, typical, atEdge, atAnySide);
+  const result = classify(regions, w, h, params, minArea, given.body);
   result.background = bg; // the mat color, used to recognise bare mat elsewhere
+  result.threshold = cutoff;
+  result.typicalArea = typical;
   if (params.debug) result.debug = { mask, regions, typical, bg };
   return result;
 }
@@ -88,7 +102,7 @@ function noiseLevel(dist) {
   return near[Math.floor(near.length * 0.9)];
 }
 
-function threshold(dist, noise, params) {
+function pickThreshold(dist, noise, params) {
   let maxV = 1;
   for (const v of dist.data) if (v > maxV) maxV = v;
   const bins = 256, hist = new Float64Array(bins);
@@ -109,10 +123,7 @@ function threshold(dist, noise, params) {
   }
   const otsu = ((bestT + 0.5) / (bins - 1)) * maxV;
   // Otsu alone sits too high when some pieces are vivid and others dull.
-  const t = Math.max(params.minBackgroundDistance, Math.min(otsu, noise * 1.6 + 2));
-  const mask = new Uint8Array(dist.data.length);
-  for (let i = 0; i < mask.length; i++) mask[i] = dist.data[i] > t ? 1 : 0;
-  return mask;
+  return Math.max(params.minBackgroundDistance, Math.min(otsu, noise * 1.6 + 2));
 }
 
 /** dilate=true: any pixel set in the window; dilate=false (erode): all pixels set. */
@@ -129,6 +140,8 @@ function dilateErode(mask, w, h, r, dilate) {
   }
   return out;
 }
+
+const ALL_EDGES = Object.freeze({ left: true, top: true, right: true, bottom: true });
 
 /** 4-connected components: [{ area, minX, minY, maxX, maxY, touches }] plus labels if requested. */
 function components(mask, w, h, wantLabels = false) {
@@ -206,7 +219,7 @@ function distanceTransform(mask, w, h) {
  * narrow valleys. One seed per hill, then regions grow downhill until they meet.
  * Blobs no bigger than ~1.5 pieces are left whole. Returns regions with their pixel lists.
  */
-function splitTouching(mask, w, h, typicalArea) {
+function splitTouching(mask, w, h, typicalArea, atEdge, atAnySide) {
   const { comps, labels: compOf } = components(mask, w, h, true);
   const labels = new Int32Array(w * h).fill(-1);
   let regionCount = 0;
@@ -278,8 +291,9 @@ function splitTouching(mask, w, h, typicalArea) {
     area: counts[k],
     pixels: pixels.subarray(start[k], start[k + 1]),
     // Anything split off a blob that reaches the photo edge (the table or floor around the mat, or pieces
-    // cut off by the edge) is excluded.
-    touches: comps[regionComp[k]].touches,
+    // cut off by the edge) is excluded; so is a piece cut by a section boundary (its neighbour section has it).
+    touches: atEdge(comps[regionComp[k]]),
+    cut: atAnySide(r),
   })).filter((r) => r.area > 0);
 }
 
@@ -329,8 +343,8 @@ function mergeFragments(labels, w, h, n, typicalArea) {
   for (let i = 0; i < labels.length; i++) if (labels[i] >= 0) labels[i] = find(labels[i]);
 }
 
-function classify(regions, w, h, params, minArea) {
-  const candidates = regions.filter((r) => r.area >= minArea && !r.touches);
+function classify(regions, w, h, params, minArea, givenBody) {
+  const candidates = regions.filter((r) => r.area >= minArea && !r.touches && !r.cut);
   const cutOff = regions.filter((r) => r.area >= minArea && r.touches).length;
   if (candidates.length === 0) return { pieces: [], clumps: 0, cutOff };
   const typical = median(candidates.map((r) => r.area));
@@ -343,7 +357,7 @@ function classify(regions, w, h, params, minArea) {
   }
   // Keep only piece-shaped regions: a square body about the usual size, no wider than body + two knobs.
   // Two pieces stuck together, or a piece with a neighbour's knob attached, fail these checks.
-  const body = median(measured.map((p) => p.bodySize));
+  const body = givenBody ?? median(measured.map((p) => p.bodySize));
   const pieces = [];
   for (const p of measured) {
     const squareish = Math.max(p.bodyW, p.bodyH) / Math.max(1, Math.min(p.bodyW, p.bodyH)) < 1.45;

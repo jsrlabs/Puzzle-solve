@@ -22,6 +22,8 @@ Then it tells you which **one piece** to place next:
 * An arrow drawn on the piece shows which way is "up" (the top of your puzzle), and the text says how far to turn it.
 * Close-ups show the piece and where it goes, both in the box picture and on your table. **Save image** shares or downloads the composite.
 
+Photos are analysed at full resolution (up to 4096 px), in sections: the app first looks at a reduced copy of the whole photo (to find your board and the layout), then scans the busiest part of the table at full detail and shows the first good piece as soon as it has one. When you run out of suggestions it automatically looks at the next part of the photo; **Look at the rest of the photo** does that on request.
+
 Tap **Placed it! Next** for the next piece. When none of the loose pieces connect any more, take a new photo; your board progress is kept. You can fix the app's idea of what is placed with **Mark pieces already placed**.
 
 ## Getting good results
@@ -43,6 +45,8 @@ No build step and no dependencies: plain HTML, CSS and JavaScript modules.
 | `web/src/engine/` | The solver and the next-piece planner (see "How the solver works" below). Pure JavaScript, no DOM, so it also runs in Node. |
 | `web/test/` | Node tests: synthetic puzzles (pieces land in the right place, a simulated placing session), plus real photos from `testdata/`. |
 | `testdata/` | Real photos used by the tests: a box shot at an angle, and a table with the border assembled. Kept outside `web/` so they aren't published with the site. |
+
+**Matching benchmark.** `npm run bench` treats each piece of the assembled border in the real test photo as if it were loose and counts how often the matcher puts it back in its own cell. Pieces whose spot isn't visible in the box art (under the title banner, or past the edge of the box art) don't count. `WITH_CV=1 npm run bench` adds OpenCV.js template matching for comparison: it was a little more accurate (87% vs 82% at the time) but about 9× slower, plus a 10 MB download, so the app doesn't use it. The answer key comes from the app's own board alignment, so treat the numbers as relative.
 
 **Run it locally.** The page uses module workers, so it must be served over HTTP; opening `index.html` as a file won't work:
 
@@ -85,7 +89,7 @@ box straightening or board detection).
    * Anything connected to the photo edge (table, floor) is ignored.
    * For each piece, work out the angle of its square body from the outline. Round knobs cancel out in a 4-fold angle average.
    * Measure the body's center and size, ignoring the knobs.
-2. **Locate each piece in the box picture** (`locator.js`):
+2. **Locate each piece in the box picture** (`locator.js`). A coarse search over the whole picture nominates the 25 best spots; a second look at three times the detail decides between them:
    * Resample the box picture so every puzzle cell is 16 px.
    * Sample a 12x12 grid of Lab colors from each piece's body.
    * Compare those samples against every position in the box picture, in all four 90° orientations.

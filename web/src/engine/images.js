@@ -10,6 +10,15 @@ export class RgbaImage {
     this.data = data;
   }
 
+  /** Copy of the rectangle [x, x+w) x [y, y+h) (clamped to the image). */
+  crop(x, y, w, h) {
+    const x0 = Math.max(0, Math.floor(x)), y0 = Math.max(0, Math.floor(y));
+    const x1 = Math.min(this.width, Math.ceil(x + w)), y1 = Math.min(this.height, Math.ceil(y + h));
+    const cw = x1 - x0, ch = y1 - y0, out = new Uint8ClampedArray(cw * ch * 4);
+    for (let r = 0; r < ch; r++) out.set(this.data.subarray(((y0 + r) * this.width + x0) * 4, ((y0 + r) * this.width + x1) * 4), r * cw * 4);
+    return new RgbaImage(cw, ch, out);
+  }
+
   /** Area-averaging downscale so the longest side is at most maxDim. */
   downscaleToMax(maxDim) {
     const longest = Math.max(this.width, this.height);
@@ -67,17 +76,31 @@ export class Plane {
     return top + (bot - top) * ty;
   }
 
-  /** (2r+1)^2 box blur; edges use the partial window. */
+  /** (2r+1)^2 box blur; edges use the partial window. Separable running sums: fast, little extra memory. */
   boxBlur(r) {
     if (r <= 0) return new Plane(this.width, this.height, this.data.slice());
-    const w = this.width, h = this.height;
-    const ii = new IntegralImage(this);
-    const out = new Plane(w, h);
+    const w = this.width, h = this.height, src = this.data;
+    const tmp = new Float32Array(w * h), out = new Plane(w, h);
     for (let y = 0; y < h; y++) {
-      const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
+      const row = y * w;
+      let sum = 0;
+      for (let x = 0; x <= Math.min(r, w - 1); x++) sum += src[row + x];
       for (let x = 0; x < w; x++) {
         const x0 = Math.max(0, x - r), x1 = Math.min(w - 1, x + r);
-        out.data[y * w + x] = ii.sum(x0, y0, x1, y1) / ((x1 - x0 + 1) * (y1 - y0 + 1));
+        tmp[row + x] = sum / (x1 - x0 + 1);
+        if (x + r + 1 < w) sum += src[row + x + r + 1];
+        if (x - r >= 0) sum -= src[row + x - r];
+      }
+    }
+    const d = out.data;
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      for (let y = 0; y <= Math.min(r, h - 1); y++) sum += tmp[y * w + x];
+      for (let y = 0; y < h; y++) {
+        const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
+        d[y * w + x] = sum / (y1 - y0 + 1);
+        if (y + r + 1 < h) sum += tmp[(y + r + 1) * w + x];
+        if (y - r >= 0) sum -= tmp[(y - r) * w + x];
       }
     }
     return out;
