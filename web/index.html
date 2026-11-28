@@ -101,6 +101,7 @@
           <button id="placed" class="btn primary grow">Placed it! Next</button>
           <button id="skip" class="btn grow">Doesn't fit / skip</button>
         </div>
+        <button id="report" class="btn text">Report a problem with this suggestion</button>
 
         <h3>Close-up</h3>
         <div class="pair">
@@ -134,6 +135,42 @@
       <button id="retake" class="btn big">New photo of remaining pieces</button>
     </section>
   </main>
+
+  <dialog id="reportDialog">
+    <div id="reportStep1">
+      <h2>Report a problem</h2>
+      <p class="hint">This makes a report (with small pictures of the piece and where the app sent it) and opens a new
+        issue on GitHub for you to paste it into. It gets checked automatically and a diagnosis is posted on the issue.</p>
+      <fieldset class="choices">
+        <label><input type="radio" name="problem" value="The piece doesn't fit there" checked> The piece doesn't fit there</label>
+        <label><input type="radio" name="problem" value="The highlighted outline isn't one piece"> The highlighted outline isn't one piece</label>
+        <label><input type="radio" name="problem" value="The arrow points to the wrong spot"> The arrow points to the wrong spot on my puzzle</label>
+        <label><input type="radio" name="problem" value="The turn direction is wrong"> The piece fits, but it's turned wrong</label>
+        <label><input type="radio" name="problem" value="Something else"> Something else</label>
+      </fieldset>
+      <label class="field">Anything else? (optional)
+        <textarea id="reportNote" rows="3" placeholder="e.g. it belongs two pieces further left"></textarea>
+      </label>
+      <div class="row">
+        <button id="reportGo" class="btn primary grow">Copy report &amp; open GitHub</button>
+        <button id="reportCancel" class="btn">Cancel</button>
+      </div>
+    </div>
+    <div id="reportStep2" hidden>
+      <h2>Almost done</h2>
+      <p id="reportCopied">The report is copied. In the GitHub tab that opened, select the description box, paste
+        (long-press or right-click → Paste) and press <b>Submit new issue</b>.</p>
+      <p id="reportCopyFailed" class="warning" hidden>Couldn't copy automatically. Select all the text below, copy it,
+        and paste it as the issue description.</p>
+      <textarea id="reportText" rows="5" readonly hidden></textarea>
+      <div class="row">
+        <button id="reportOpen" class="btn">Open GitHub again</button>
+        <button id="reportCopy" class="btn">Copy again</button>
+        <button id="reportDone" class="btn primary">Done</button>
+      </div>
+      <p class="hint">You need to be signed in to GitHub with access to the repository.</p>
+    </div>
+  </dialog>
 
   <dialog id="errorDialog">
     <h2>Something went wrong</h2>

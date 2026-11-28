@@ -26,6 +26,19 @@ Photos are analysed at full resolution (up to 4096 px), in sections: the app fir
 
 Tap **Placed it! Next** for the next piece. When none of the loose pieces connect any more, take a new photo; your board progress is kept. You can fix the app's idea of what is placed with **Mark pieces already placed**.
 
+### Reporting a wrong suggestion
+
+**Report a problem with this suggestion** (under the Placed / Skip buttons) makes a report about the current suggestion and opens a new issue on this repository.
+
+The report holds the numbers behind the suggestion, plus small pictures:
+* the piece;
+* where it was sent in the box picture, and the whole box picture with that spot marked;
+* the same spot on your table.
+
+The pictures are base64 text, so they can be read from a private repository. Paste the report as the issue description and submit; the app copies it to the clipboard first.
+
+A scheduled check picks up new `[Puzzle report]` issues, diagnoses them and comments on the issue. To unpack a report yourself, save the issue text to a file and run `node tools/decode-report.mjs report.md out/`.
+
 ## Getting good results
 
 * Use a plain mat or cloth that contrasts with the pieces. A black puzzle mat works well.

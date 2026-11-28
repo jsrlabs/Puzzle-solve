@@ -5,6 +5,7 @@ import { RgbaImage } from './engine/images.js';
 import { cellKey, cornerName, isEdge, nextPlacement } from './engine/planner.js';
 import { detectPictureQuad } from './engine/quad.js';
 import { gridFromPieceCount } from './engine/solver.js';
+import { buildReport, newIssueUrl } from './report.js';
 
 const MAX_IMAGE_DIM = 4096; // full resolution for typical phone photos (12 MP)
 const MOVER = '#ff2d87';
@@ -730,6 +731,66 @@ async function saveComposite() {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
+// ───────────────────────── Problem reports ─────────────────────────
+
+let appVersion = 'dev';
+fetch('version.json', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).then((v) => { if (v?.commit) appVersion = v.commit; }).catch(() => {});
+
+let lastReport = null;
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch { return false; }
+}
+
+function setupReport() {
+  const dlg = $('reportDialog');
+  $('report').addEventListener('click', () => {
+    $('reportStep1').hidden = false;
+    $('reportStep2').hidden = true;
+    $('reportNote').value = '';
+    dlg.showModal();
+  });
+  $('reportCancel').addEventListener('click', () => dlg.close());
+  $('reportGo').addEventListener('click', async () => {
+    const step = currentStep();
+    const problem = dlg.querySelector('input[name=problem]:checked')?.value ?? 'Something else';
+    lastReport = buildReport({
+      problem,
+      note: $('reportNote').value.trim(),
+      version: appVersion,
+      analysis: state.analysis,
+      step,
+      pieces: state.pieces,
+      box: state.analyzedBox,
+      cellRect,
+      cellOnPhoto: state.analysis.board ? cellOnPhoto : null,
+      placedCount: state.placed.size,
+      layoutAsked: state.layoutAsked,
+    });
+    // Start the copy while this page has focus, then open the tab in the same tap (so it isn't blocked).
+    const copying = copyText(lastReport.body);
+    window.open(newIssueUrl(lastReport.title), '_blank', 'noopener');
+    const ok = await copying;
+    $('reportCopied').hidden = !ok;
+    $('reportCopyFailed').hidden = ok;
+    $('reportText').hidden = ok;
+    $('reportText').value = lastReport.body;
+    $('reportStep1').hidden = true;
+    $('reportStep2').hidden = false;
+    // Move on: this suggestion was wrong.
+    if (step) state.skipped.add(step.piece.id);
+  });
+  $('reportOpen').addEventListener('click', () => lastReport && window.open(newIssueUrl(lastReport.title), '_blank', 'noopener'));
+  $('reportCopy').addEventListener('click', async () => {
+    if (!lastReport) return;
+    const ok = await copyText(lastReport.body);
+    $('reportCopied').hidden = !ok;
+    $('reportCopyFailed').hidden = ok;
+    $('reportText').hidden = ok;
+  });
+  $('reportDone').addEventListener('click', () => { dlg.close(); renderResult(); });
+}
+
 // ───────────────────────── Navigation & wiring ─────────────────────────
 
 function showScreen(name) {
@@ -802,6 +863,7 @@ function init() {
   $('backToResult').addEventListener('click', () => showScreen('result'));
   $('back').addEventListener('click', () => showScreen('setup'));
   $('scanMore').addEventListener('click', scanMore);
+  setupReport();
   $('placed').addEventListener('click', () => {
     const s = currentStep();
     if (s) {

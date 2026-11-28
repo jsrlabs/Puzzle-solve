@@ -9,3 +9,4 @@ captures/
 *.apk
 *.keystore
 node_modules/
+version.json

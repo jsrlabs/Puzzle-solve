@@ -38,6 +38,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      - name: Record the app version (shown in problem reports)
+        run: echo "{\"commit\":\"${GITHUB_SHA::7}\"}" > web/version.json
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web
