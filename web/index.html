@@ -23,21 +23,24 @@
 
       <div class="card">
         <h2>1. The box picture</h2>
-        <p class="hint">Photograph the picture on the box from straight on, filling the frame. Then adjust the crop so
-          only the puzzle picture is inside.</p>
+        <p class="hint">Photograph the picture on the box. It doesn't need to be straight: the app finds the picture and
+          straightens it.</p>
         <canvas id="boxPreview" class="preview" hidden></canvas>
+        <p id="cropHint" class="hint" hidden></p>
         <div class="row">
           <label class="btn primary">Take photo<input type="file" accept="image/*" capture="environment" data-slot="box" hidden></label>
           <label class="btn">Choose photo<input type="file" accept="image/*" data-slot="box" hidden></label>
-          <button id="cropToggle" class="btn" hidden>Adjust crop</button>
-          <button id="cropReset" class="btn text" hidden>Reset crop</button>
+          <button id="cropToggle" class="btn" hidden>Adjust corners</button>
+          <button id="cropAuto" class="btn text" hidden>Detect again</button>
+          <button id="cropFull" class="btn text" hidden>Use whole photo</button>
         </div>
       </div>
 
       <div class="card">
-        <h2>2. The loose pieces</h2>
-        <p class="hint">Spread pieces picture-side up on a plain surface that contrasts with them (a dark cloth or a
-          sheet of paper). Make sure no pieces touch, and photograph from straight above in good light.</p>
+        <h2>2. Your table</h2>
+        <p class="hint">Spread pieces picture-side up on a plain mat or cloth that contrasts with them, not touching each
+          other. Photograph from straight above in good light. Include the puzzle you've started (e.g. the border) in
+          the same photo and the app recognises the pieces already in place.</p>
         <canvas id="piecesPreview" class="preview" hidden></canvas>
         <div class="row">
           <label class="btn primary">Take photo<input type="file" accept="image/*" capture="environment" data-slot="pieces" hidden></label>
@@ -73,6 +76,7 @@
         <button id="back" class="btn text">‹ Photos</button>
         <span id="foundCount" class="hint"></span>
       </div>
+      <p id="layoutInfo" class="hint"></p>
       <div id="warnings"></div>
 
       <div id="suggestion">
@@ -93,7 +97,8 @@
         <h3>Close-up</h3>
         <div class="pair">
           <figure><canvas id="pieceZoom" class="view"></canvas><figcaption>The piece</figcaption></figure>
-          <figure><canvas id="boardZoom" class="view"></canvas><figcaption>Where it goes</figcaption></figure>
+          <figure><canvas id="boardZoom" class="view"></canvas><figcaption>Where it goes (box picture)</figcaption></figure>
+          <figure id="tableZoomFig" hidden><canvas id="tableZoom" class="view"></canvas><figcaption>Where it goes on your table</figcaption></figure>
         </div>
         <button id="download" class="btn">Save image</button>
       </div>

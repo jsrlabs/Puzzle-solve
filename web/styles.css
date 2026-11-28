@@ -141,7 +141,7 @@ dialog::backdrop { background: #0008; }
 
 #suggestion, #noSuggestion { display: flex; flex-direction: column; gap: 12px; }
 
-.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
 .pair figure { margin: 0; display: flex; flex-direction: column; gap: 4px; }
 .pair figcaption { color: var(--muted); font-size: 0.85rem; text-align: center; }
 #composite { background: transparent; }

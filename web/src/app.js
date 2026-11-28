@@ -1,5 +1,9 @@
-// Puzzle Helper web UI: photo capture, box cropping, running the solver in a worker, suggesting the next piece.
+// Puzzle Helper web UI: photo capture, finding/straightening the box picture, running the solver in a worker,
+// suggesting the next piece.
+import { applyH, quadSize, warpQuad } from './engine/geometry.js';
+import { RgbaImage } from './engine/images.js';
 import { cellKey, cornerName, isEdge, nextPlacement } from './engine/planner.js';
+import { detectPictureQuad } from './engine/quad.js';
 import { gridFromPieceCount } from './engine/solver.js';
 
 const MAX_IMAGE_DIM = 2400;
@@ -9,11 +13,12 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   box: null, // canvas holding the box photo
-  crop: { l: 0, t: 0, r: 1, b: 1 }, // normalized crop of the box photo
+  quad: null, // corners [tl, tr, br, bl] of the puzzle picture in the box photo
+  straightBox: null, // cached perspective-corrected picture
   editingCrop: false,
   pieces: null, // canvas holding the pieces photo
   analysis: null,
-  analyzedBox: null, // cropped box canvas the analysis refers to
+  analyzedBox: null, // straightened box picture the analysis refers to
   placed: new Set(), // cellKey()s of cells already on the user's board (kept across new pieces photos)
   boardGrid: null, // grid the placed cells refer to
   usedPieces: new Set(), // ids of loose pieces (in the current photo) that were placed
@@ -47,15 +52,6 @@ async function loadImage(file) {
   ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
   source.close?.();
   return canvas;
-}
-
-function cropCanvas(src, c) {
-  const x = Math.round(c.l * src.width), y = Math.round(c.t * src.height);
-  const w = Math.max(1, Math.round((c.r - c.l) * src.width)), h = Math.max(1, Math.round((c.b - c.t) * src.height));
-  const out = document.createElement('canvas');
-  out.width = w; out.height = h;
-  out.getContext('2d').drawImage(src, x, y, w, h, 0, 0, w, h);
-  return out;
 }
 
 function pixelsOf(canvas) {
@@ -139,35 +135,63 @@ function drawArrow(ctx, map, from, dir, length, color) {
 
 // ───────────────────────── Setup screen ─────────────────────────
 
+const fullQuad = (img) => [{ x: 0, y: 0 }, { x: img.width, y: 0 }, { x: img.width, y: img.height }, { x: 0, y: img.height }];
+const toRgba = (canvas) => { const p = pixelsOf(canvas); return new RgbaImage(p.width, p.height, p.data); };
+
+function rgbaToCanvas(img) {
+  const c = document.createElement('canvas');
+  c.width = img.width; c.height = img.height;
+  c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(img.data.buffer, img.data.byteOffset, img.data.length), img.width, img.height), 0, 0);
+  return c;
+}
+
+/** Finds the puzzle picture in the box photo and straightens it. */
+function autoDetectBox() {
+  const found = detectPictureQuad(toRgba(state.box));
+  state.quad = found ? found.quad : fullQuad(state.box);
+  state.straightBox = null;
+  $('cropHint').textContent = found
+    ? 'Picture found and straightened automatically. If the corners are off, tap "Adjust corners".'
+    : "Couldn't find the picture's edges. Tap \"Adjust corners\" and drag the four corners onto the picture's corners.";
+  $('cropHint').hidden = false;
+}
+
+/** The box picture, perspective-corrected to an upright rectangle (cached until the corners change). */
+function straightBox() {
+  if (!state.straightBox) state.straightBox = rgbaToCanvas(warpQuad(toRgba(state.box), state.quad, MAX_IMAGE_DIM));
+  return state.straightBox;
+}
+
 function renderBoxPreview() {
   const canvas = $('boxPreview');
   const box = state.box;
   canvas.hidden = !box;
-  $('cropToggle').hidden = !box;
-  $('cropReset').hidden = !box || !state.editingCrop;
-  if (!box) return;
-  $('cropToggle').textContent = state.editingCrop ? 'Done' : 'Adjust crop';
+  for (const id of ['cropToggle', 'cropAuto', 'cropFull']) $(id).hidden = !box;
+  $('cropAuto').hidden = $('cropFull').hidden = !box || !state.editingCrop;
+  if (!box) { $('cropHint').hidden = true; return; }
+  $('cropToggle').textContent = state.editingCrop ? 'Done' : 'Adjust corners';
   canvas.classList.toggle('editing', state.editingCrop);
   if (!state.editingCrop) {
-    const c = state.crop;
-    const rect = { x: c.l * box.width, y: c.t * box.height, w: (c.r - c.l) * box.width, h: (c.b - c.t) * box.height };
-    drawFitted(canvas, box, rect, 260);
+    drawFitted(canvas, straightBox(), null, 260);
     return;
   }
   cropMap = drawFitted(canvas, box, null, 480, (ctx, map) => {
-    const c = state.crop;
+    const pts = state.quad.map((p) => map.pt(p));
     const [x0, y0] = map.pt({ x: 0, y: 0 }), [x1, y1] = map.pt({ x: box.width, y: box.height });
-    const [l, t] = map.pt({ x: c.l * box.width, y: c.t * box.height });
-    const [r, b] = map.pt({ x: c.r * box.width, y: c.b * box.height });
+    // Darken everything outside the quad (even-odd fill of image rect + quad).
+    ctx.beginPath();
+    ctx.rect(x0, y0, x1 - x0, y1 - y0);
+    pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath();
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fillRect(x0, y0, x1 - x0, t - y0);
-    ctx.fillRect(x0, b, x1 - x0, y1 - b);
-    ctx.fillRect(x0, t, l - x0, b - t);
-    ctx.fillRect(r, t, x1 - r, b - t);
+    ctx.fill('evenodd');
+    ctx.beginPath();
+    pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath();
     ctx.strokeStyle = '#fff';
     ctx.lineWidth = 2;
-    ctx.strokeRect(l, t, r - l, b - t);
-    for (const [hx, hy] of [[l, t], [r, t], [r, b], [l, b]]) {
+    ctx.stroke();
+    for (const [hx, hy] of pts) {
       ctx.beginPath();
       ctx.arc(hx, hy, 10, 0, Math.PI * 2);
       ctx.fillStyle = '#fff';
@@ -180,7 +204,17 @@ function renderBoxPreview() {
 }
 
 let cropMap = null;
-let cropDrag = null; // { handle: 0..3 corner | 4 move, start, crop }
+let cropDrag = null; // { handle: 0..3 corner | 4 move all, start: image point, quad }
+
+function insideQuad(q, x, y) {
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) % 4];
+    const cross = (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+    if (cross !== 0) { if (sign && Math.sign(cross) !== sign) return false; sign = Math.sign(cross); }
+  }
+  return true;
+}
 
 function setupCropEditor() {
   const canvas = $('boxPreview');
@@ -188,40 +222,34 @@ function setupCropEditor() {
   canvas.addEventListener('pointerdown', (e) => {
     if (!state.editingCrop || !cropMap) return;
     const [px, py] = pos(e);
-    const c = state.crop, W = state.box.width, H = state.box.height;
-    const corners = [[c.l, c.t], [c.r, c.t], [c.r, c.b], [c.l, c.b]].map(([u, v]) => cropMap.pt({ x: u * W, y: v * H }));
+    const corners = state.quad.map((p) => cropMap.pt(p));
     const dists = corners.map(([x, y]) => Math.hypot(x - px, y - py));
     const nearest = dists.indexOf(Math.min(...dists));
-    const [l, t] = corners[0], [r, b] = corners[2];
-    const handle = dists[nearest] < 36 ? nearest : px > l && px < r && py > t && py < b ? 4 : -1;
+    const handle = dists[nearest] < 36 ? nearest : insideQuad(corners, px, py) ? 4 : -1;
     if (handle < 0) return;
-    cropDrag = { handle, start: [px, py], crop: { ...c } };
+    cropDrag = { handle, start: cropMap.unmap(px, py), quad: state.quad.map((p) => ({ ...p })) };
     canvas.setPointerCapture(e.pointerId);
     e.preventDefault();
   });
   canvas.addEventListener('pointermove', (e) => {
     if (!cropDrag) return;
     const [px, py] = pos(e);
-    const dx = (px - cropDrag.start[0]) / cropMap.scale / state.box.width;
-    const dy = (py - cropDrag.start[1]) / cropMap.scale / state.box.height;
-    const c0 = cropDrag.crop, min = 0.1;
-    const cl = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-    let c = { ...c0 };
-    const left = () => { c.l = cl(c0.l + dx, 0, c0.r - min); };
-    const right = () => { c.r = cl(c0.r + dx, c0.l + min, 1); };
-    const top = () => { c.t = cl(c0.t + dy, 0, c0.b - min); };
-    const bottom = () => { c.b = cl(c0.b + dy, c0.t + min, 1); };
-    switch (cropDrag.handle) {
-      case 0: left(); top(); break;
-      case 1: right(); top(); break;
-      case 2: right(); bottom(); break;
-      case 3: left(); bottom(); break;
-      default: {
-        const mx = cl(dx, -c0.l, 1 - c0.r), my = cl(dy, -c0.t, 1 - c0.b);
-        c = { l: c0.l + mx, t: c0.t + my, r: c0.r + mx, b: c0.b + my };
-      }
+    const p = cropMap.unmap(px, py);
+    const W = state.box.width, H = state.box.height;
+    let dx = p.x - cropDrag.start.x, dy = p.y - cropDrag.start.y;
+    const q = cropDrag.quad.map((c) => ({ ...c }));
+    if (cropDrag.handle === 4) {
+      // Move the whole quad, keeping it on the photo.
+      dx = Math.min(W - Math.max(...q.map((c) => c.x)), Math.max(-Math.min(...q.map((c) => c.x)), dx));
+      dy = Math.min(H - Math.max(...q.map((c) => c.y)), Math.max(-Math.min(...q.map((c) => c.y)), dy));
+      q.forEach((c) => { c.x += dx; c.y += dy; });
+    } else {
+      const c = q[cropDrag.handle];
+      c.x = Math.min(W, Math.max(0, c.x + dx));
+      c.y = Math.min(H, Math.max(0, c.y + dy));
     }
-    state.crop = c;
+    state.quad = q;
+    state.straightBox = null;
     renderBoxPreview();
     updateGridInfo();
   });
@@ -238,18 +266,17 @@ function renderPiecesPreview() {
 
 function resolveGrid() {
   const cols = parseInt($('cols').value, 10), rows = parseInt($('rows').value, 10);
-  if (cols > 0 && rows > 0) return { cols, rows };
+  if (cols > 0 && rows > 0) return { cols, rows, exact: true };
   const count = parseInt($('pieceCount').value, 10);
   if (!(count >= 4) || !state.box) return null;
-  const c = state.crop;
-  const aspect = ((c.r - c.l) * state.box.width) / ((c.b - c.t) * state.box.height);
-  return gridFromPieceCount(count, aspect);
+  const { w, h } = quadSize(state.quad);
+  return { ...gridFromPieceCount(count, w / h), pieceCount: count };
 }
 
 function updateGridInfo() {
   const g = resolveGrid();
   $('gridInfo').textContent = g
-    ? `Using ${g.cols} columns × ${g.rows} rows (${g.cols * g.rows} pieces).`
+    ? `Using ${g.cols} columns × ${g.rows} rows (${g.cols * g.rows} pieces)${g.exact ? '' : '. If your photo shows the started puzzle, the layout is measured from it'}.`
     : 'Add the box picture and the piece count to work out the layout.';
   $('analyze').disabled = !(g && state.box && state.pieces) || busy;
 }
@@ -271,7 +298,8 @@ function cancelAnalysis() {
 function runAnalysis() {
   const grid = resolveGrid();
   if (!grid || !state.box || !state.pieces) return;
-  const cropped = cropCanvas(state.box, state.crop);
+  const cropped = straightBox();
+  state.layoutAsked = grid;
   const box = pixelsOf(cropped), pieces = pixelsOf(state.pieces);
   worker?.terminate();
   worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
@@ -294,6 +322,8 @@ function runAnalysis() {
     const g = msg.result.grid;
     if (!state.boardGrid || state.boardGrid.cols !== g.cols || state.boardGrid.rows !== g.rows) state.placed.clear();
     state.boardGrid = g;
+    // Cells the app saw already assembled in the photo.
+    for (const key of msg.result.board?.placed ?? []) state.placed.add(key);
     state.analysis = msg.result;
     state.analyzedBox = cropped;
     state.usedPieces.clear();
@@ -322,7 +352,9 @@ function currentStep() {
 /** How far to turn a piece, given where its top currently points in the photo. */
 function turnHint(up) {
   if (!up) return 'orientation unknown';
-  const deg = (Math.atan2(up.x, -up.y) * 180) / Math.PI; // clockwise from photo-up
+  // "Up" is the top of the started puzzle if it is in the photo, else the top of the photo.
+  const ref = state.analysis?.board?.up ?? { x: 0, y: -1 };
+  const deg = (Math.atan2(ref.x * up.y - ref.y * up.x, ref.x * up.x + ref.y * up.y) * 180) / Math.PI; // clockwise from ref
   const rounded = Math.round(deg / 45) * 45;
   if (Math.abs(deg) < 20) return 'it is already upright';
   if (Math.abs(rounded) === 180) return 'turn it upside down';
@@ -350,31 +382,48 @@ const rectMap = (r) => ({
  * Darkens board cells that are not on the board yet; placed cells and the target cell stay bright.
  * Works in box-image coordinates through `map`.
  */
+/** Box-picture pixel rectangle of puzzle cell (col, row) (the picture may be cropped differently). */
+function cellRect(col, row) {
+  const b = state.analysis.boxCells;
+  return { x: b.x0 + col * b.cw, y: b.y0 + row * b.ch, w: b.cw, h: b.ch };
+}
+
 function shadeBoard(ctx, map, target) {
-  const a = state.analysis, box = state.analyzedBox, g = a.grid;
-  const cw = box.width / g.cols, ch = box.height / g.rows;
+  const a = state.analysis, g = a.grid;
+  const cw = a.boxCells.cw;
   const targetKey = target ? cellKey(target.col, target.row) : null;
+  // The puzzle can extend a little past the box art: keep the shading on the picture.
+  const box = state.analyzedBox;
+  const [ix0, iy0] = map.pt({ x: 0, y: 0 }), [ix1, iy1] = map.pt({ x: box.width, y: box.height });
+  ctx.save();
   ctx.beginPath();
+  ctx.rect(ix0, iy0, ix1 - ix0, iy1 - iy0);
+  ctx.clip();
+  const dim = new Path2D(), done = new Path2D();
   for (let r = 0; r < g.rows; r++) for (let c = 0; c < g.cols; c++) {
     const key = cellKey(c, r);
-    if (state.placed.has(key) || key === targetKey) continue;
-    const [x0, y0] = map.pt({ x: c * cw, y: r * ch });
-    const [x1, y1] = map.pt({ x: (c + 1) * cw, y: (r + 1) * ch });
-    ctx.rect(x0, y0, x1 - x0, y1 - y0);
+    if (key === targetKey) continue;
+    const rc = cellRect(c, r);
+    const [x0, y0] = map.pt(rc), [x1, y1] = map.pt({ x: rc.x + rc.w, y: rc.y + rc.h });
+    (state.placed.has(key) ? done : dim).rect(x0, y0, x1 - x0, y1 - y0);
   }
   ctx.fillStyle = 'rgba(14, 15, 22, 0.68)';
-  ctx.fill();
+  ctx.fill(dim);
+  ctx.fillStyle = 'rgba(60, 230, 130, 0.22)'; // a light green tint marks pieces already on the board
+  ctx.fill(done);
+  ctx.restore();
   if (cw * map.scale >= 7) { // grid lines, when cells are big enough to see
+    const tl = cellRect(0, 0), br = cellRect(g.cols, g.rows);
     ctx.beginPath();
-    for (let c = 1; c < g.cols; c++) { const [x, y0] = map.pt({ x: c * cw, y: 0 }); const [, y1] = map.pt({ x: c * cw, y: box.height }); ctx.moveTo(x, y0); ctx.lineTo(x, y1); }
-    for (let r = 1; r < g.rows; r++) { const [x0, y] = map.pt({ x: 0, y: r * ch }); const [x1] = map.pt({ x: box.width, y: r * ch }); ctx.moveTo(x0, y); ctx.lineTo(x1, y); }
+    for (let c = 1; c < g.cols; c++) { const x = cellRect(c, 0).x; const [px, y0] = map.pt({ x, y: tl.y }); const [, y1] = map.pt({ x, y: br.y }); ctx.moveTo(px, y0); ctx.lineTo(px, y1); }
+    for (let r = 1; r < g.rows; r++) { const y = cellRect(0, r).y; const [x0, py] = map.pt({ x: tl.x, y }); const [x1] = map.pt({ x: br.x, y }); ctx.moveTo(x0, py); ctx.lineTo(x1, py); }
     ctx.strokeStyle = 'rgba(255,255,255,0.13)';
     ctx.lineWidth = 1;
     ctx.stroke();
   }
   if (target) {
-    const [x0, y0] = map.pt({ x: target.col * cw, y: target.row * ch });
-    const [x1, y1] = map.pt({ x: (target.col + 1) * cw, y: (target.row + 1) * ch });
+    const rc = cellRect(target.col, target.row);
+    const [x0, y0] = map.pt(rc), [x1, y1] = map.pt({ x: rc.x + rc.w, y: rc.y + rc.h });
     ctx.beginPath();
     ctx.rect(x0, y0, x1 - x0, y1 - y0);
     strokeTwice(ctx, MOVER, 3);
@@ -480,7 +529,7 @@ function drawComposite(canvas, step) {
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
   ctx.fillText(`Your board (${state.placed.size} of ${g.cols * g.rows} placed)`, rb.x, rb.y - 8);
-  ctx.fillText('Loose pieces', rp.x, rp.y - 8);
+  ctx.fillText(state.analysis.board ? 'Your table' : 'Loose pieces', rp.x, rp.y - 8);
 
   const mb = rectMap(rb), mp = rectMap(rp);
   ctx.imageSmoothingQuality = 'high';
@@ -491,11 +540,28 @@ function drawComposite(canvas, step) {
 
   if (step) {
     const t = step.piece.placement;
-    const cw = box.width / g.cols, ch = box.height / g.rows;
-    const target = mb.pt({ x: (t.col + 0.5) * cw, y: (t.row + 0.5) * ch });
-    const cellR = Math.max(16, (cw * mb.scale) / 2) + 6;
-    drawBigArrow(ctx, mp.pt(step.piece.center), target, ringRadius(step.piece, mp) + 4, cellR);
+    if (state.analysis.board && t.photoTarget) {
+      // The started puzzle is in the photo: point at the real spot on it.
+      const corners = cellOnPhoto(t.col, t.row);
+      ctx.beginPath();
+      corners.forEach((c, i) => { const [x, y] = mp.pt(c); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      ctx.closePath();
+      strokeTwice(ctx, MOVER, 3);
+      const size = Math.hypot(corners[1].x - corners[0].x, corners[1].y - corners[0].y) * mp.scale;
+      drawBigArrow(ctx, mp.pt(step.piece.center), mp.pt(t.photoTarget), ringRadius(step.piece, mp) + 4, Math.max(10, size / 2) + 6);
+    } else {
+      const rc = cellRect(t.col, t.row);
+      const target = mb.pt({ x: rc.x + rc.w / 2, y: rc.y + rc.h / 2 });
+      const cellR = Math.max(16, (rc.w * mb.scale) / 2) + 6;
+      drawBigArrow(ctx, mp.pt(step.piece.center), target, ringRadius(step.piece, mp) + 4, cellR);
+    }
   }
+}
+
+/** Corners of puzzle cell (col, row) in the table photo (when the started puzzle was found in it). */
+function cellOnPhoto(col, row) {
+  const H = state.analysis.board.H;
+  return [[col, row], [col + 1, row], [col + 1, row + 1], [col, row + 1]].map(([x, y]) => applyH(H, x, y));
 }
 
 function renderBoardEditor() {
@@ -516,8 +582,8 @@ function setupBoardEditor() {
     if (!boardEditMap || !state.analysis) return null;
     const r = canvas.getBoundingClientRect();
     const p = boardEditMap.unmap(e.clientX - r.left, e.clientY - r.top);
-    const g = state.analysis.grid, box = state.analyzedBox;
-    const col = Math.floor((p.x / box.width) * g.cols), row = Math.floor((p.y / box.height) * g.rows);
+    const g = state.analysis.grid, b = state.analysis.boxCells;
+    const col = Math.floor((p.x - b.x0) / b.cw), row = Math.floor((p.y - b.y0) / b.ch);
     return col >= 0 && row >= 0 && col < g.cols && row < g.rows ? cellKey(col, row) : null;
   };
   const paint = (key) => {
@@ -548,8 +614,13 @@ function renderResult() {
   const g = a.grid;
   const loose = a.pieces.filter((p) => !state.usedPieces.has(p.id)).length;
   $('foundCount').textContent = `${a.pieces.length} pieces found · ${loose} still loose`;
+  const guessed = state.layoutAsked && !state.layoutAsked.exact &&
+    (state.layoutAsked.cols !== g.cols || state.layoutAsked.rows !== g.rows);
+  $('layoutInfo').textContent = `Layout: ${g.cols} columns × ${g.rows} rows${guessed ? ', measured from the puzzle in your photo' : ''}. ` +
+    'If that\'s wrong, enter the exact columns and rows under "Puzzle size" and run again.';
   $('warnings').replaceChildren(...a.warnings.map((w) => Object.assign(document.createElement('p'), { className: 'warning', textContent: w })));
-  $('boardInfo').textContent = `${state.placed.size} of ${g.cols * g.rows} pieces on your board (${g.cols} columns × ${g.rows} rows).`;
+  const seen = a.board ? ` The app recognised ${a.board.placed.length} already in place in your photo; fix any mistakes with the button below.` : '';
+  $('boardInfo').textContent = `${state.placed.size} of ${g.cols * g.rows} pieces on your board (${g.cols} columns × ${g.rows} rows).${seen}`;
   renderBoardEditor();
 
   const step = currentStep();
@@ -573,16 +644,30 @@ function renderResult() {
     const sides = step.neighbours.map((n) => SIDE_WORDS[n.side]);
     $('placeText').textContent = `Put the highlighted piece next to ${listWords(sides)}.`;
   }
-  $('turnText').textContent = `Turn it so the small arrow on the piece points to the top of the picture: ${turnHint(p.up)}.`;
+  $('turnText').textContent = a.board
+    ? `Turn it so the small arrow on the piece points the same way as the top of your puzzle: ${turnHint(p.up)}.`
+    : `Turn it so the small arrow on the piece points to the top of the picture: ${turnHint(p.up)}.`;
   $('whereText').textContent = `Row ${pl.row + 1}, column ${pl.col + 1} of ${g.rows} × ${g.cols}.${isEdge(g, pl.col, pl.row) && step.kind !== 'corner' ? ' It is an edge piece.' : ''}`;
   $('confText').textContent = `Confidence: ${confidenceWord(step.score)}`;
 
   drawComposite($('composite'), step);
   const zoom = boundsOf(p.corners, p.bodySize * 0.9, pieces.width, pieces.height, 1);
   drawFitted($('pieceZoom'), pieces, zoom, 220, (ctx, map) => markPieces(ctx, map, p, false));
-  const cw = box.width / g.cols, ch = box.height / g.rows;
-  const around = boundsOf([{ x: pl.col * cw, y: pl.row * ch }, { x: (pl.col + 1) * cw, y: (pl.row + 1) * ch }], Math.max(cw, ch) * 2, box.width, box.height, 1);
+  const rc = cellRect(pl.col, pl.row);
+  const around = boundsOf([rc, { x: rc.x + rc.w, y: rc.y + rc.h }], Math.max(rc.w, rc.h) * 2, box.width, box.height, 1);
   drawFitted($('boardZoom'), box, around, 220, (ctx, map) => shadeBoard(ctx, map, pl));
+  // On the started puzzle in the photo, if it was found.
+  $('tableZoomFig').hidden = !a.board;
+  if (a.board) {
+    const corners = cellOnPhoto(pl.col, pl.row);
+    const side = Math.hypot(corners[1].x - corners[0].x, corners[1].y - corners[0].y);
+    drawFitted($('tableZoom'), pieces, boundsOf(corners, side * 2.5, pieces.width, pieces.height, 1), 220, (ctx, map) => {
+      ctx.beginPath();
+      corners.forEach((c, i) => { const [x, y] = map.pt(c); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      ctx.closePath();
+      strokeTwice(ctx, MOVER, 3);
+    });
+  }
 }
 
 async function saveComposite() {
@@ -636,7 +721,7 @@ function init() {
         const canvas = await loadImage(file);
         if (input.dataset.slot === 'box') {
           state.box = canvas;
-          state.crop = { l: 0, t: 0, r: 1, b: 1 };
+          autoDetectBox();
           state.placed.clear(); // a new box means a new puzzle
           state.analysis = null;
           state.editingCrop = false;
@@ -650,7 +735,13 @@ function init() {
     });
   }
   $('cropToggle').addEventListener('click', () => { state.editingCrop = !state.editingCrop; renderBoxPreview(); });
-  $('cropReset').addEventListener('click', () => { state.crop = { l: 0, t: 0, r: 1, b: 1 }; renderBoxPreview(); updateGridInfo(); });
+  $('cropAuto').addEventListener('click', () => { autoDetectBox(); renderBoxPreview(); updateGridInfo(); });
+  $('cropFull').addEventListener('click', () => {
+    state.quad = fullQuad(state.box);
+    state.straightBox = null;
+    renderBoxPreview();
+    updateGridInfo();
+  });
   setupCropEditor();
 
   for (const id of ['pieceCount', 'cols', 'rows']) {
@@ -699,3 +790,6 @@ function init() {
 }
 
 init();
+
+// For debugging and automated browser tests: /?debug exposes the app state.
+if (new URLSearchParams(location.search).has("debug")) window.puzzleHelper = { state };

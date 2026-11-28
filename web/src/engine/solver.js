@@ -1,12 +1,15 @@
-// Entry point of the solver: box picture + photo of loose pieces -> where each piece goes and which pairs
-// of loose pieces should be joined. Pure JavaScript; runs in a Web Worker or Node.
+// Entry point of the solver: box picture + photo of the table (loose pieces, maybe the partly built puzzle)
+// -> where each loose piece goes, which cells are already placed. Pure JavaScript; runs in a Web Worker or Node.
 
+import { boardMask, detectBoard, fromBox, gridFromBoard, IDENTITY_AFFINE } from './board.js';
+import { applyH } from './geometry.js';
 import { LabImage, median } from './images.js';
 import { PieceLocator } from './locator.js';
+import { detectPictureQuad } from './quad.js';
 import { inMask, segment } from './segmenter.js';
 
 export const DEFAULT_PARAMS = Object.freeze({
-  piecesMaxDim: 1400, // longest side the pieces photo is reduced to
+  piecesMaxDim: 2400, // longest side the pieces photo is reduced to
   cellPx: 16, // pixels per puzzle cell in the internal box picture
   sampleGrid: 12, // samples per side taken from each piece body
   sampleSpan: 0.8, // fraction of the body that is sampled (avoids cut edges)
@@ -42,58 +45,100 @@ export function gridFromPieceCount(count, aspect) {
 
 /**
  * @param {import('./images.js').RgbaImage} box the box picture, cropped to just the puzzle image
- * @param {import('./images.js').RgbaImage} pieces photo of loose pieces on a plain contrasting surface
- * @param {{cols:number, rows:number}} grid
+ * @param {import('./images.js').RgbaImage} pieces photo of loose pieces on a plain contrasting surface. It may
+ *   also show the partly assembled puzzle: it is detected and its cells reported as placed.
+ * @param {{cols:number, rows:number, pieceCount?:number, exact?:boolean}} layout the grid; unless `exact`,
+ *   it may be corrected from the size of the assembled puzzle in the photo (using pieceCount).
  * @param {(fraction:number, message:string) => void} [progress]
  */
-export function analyze(box, pieces, grid, progress = () => {}, params = DEFAULT_PARAMS) {
+export function analyze(box, pieces, layout, progress = () => {}, params = DEFAULT_PARAMS) {
   const warnings = [];
   const cell = params.cellPx;
+  let grid = { cols: layout.cols, rows: layout.rows };
 
-  progress(0.02, 'Preparing box picture');
-  const workW = grid.cols * cell, workH = grid.rows * cell;
-  const boxLab = LabImage.from(box.downscaleToMax(Math.max(workW, workH) * 2)).resize(workW, workH).boxBlur(1);
-
-  progress(0.08, 'Finding pieces');
+  progress(0.02, 'Finding pieces');
   const small = pieces.downscaleToMax(params.piecesMaxDim);
   const toOriginal = pieces.width / small.width;
   const piecesLab = LabImage.from(small);
   const seg = segment(piecesLab, params);
-  if (seg.clumps > 0) warnings.push(`${seg.clumps} blob(s) looked like several touching pieces and were skipped. Spread pieces apart.`);
-  if (seg.cutOff > 0) warnings.push(`${seg.cutOff} piece(s) touching the edge of the photo were skipped.`);
   if (seg.pieces.length === 0) {
     warnings.push('No pieces found. Lay pieces picture-side up on a plain surface that contrasts with them.');
-    return { grid, pieces: [], suggestions: [], warnings };
+    return { grid, pieces: [], suggestions: [], warnings, board: null };
   }
-
   const bodyPx = median(seg.pieces.map((p) => p.bodySize));
   // Blur the pieces photo to match the detail level of the reduced box picture.
   const blurR = Math.max(0, Math.round((1.5 * bodyPx) / cell));
   const blurred = blurR > 0 ? piecesLab.boxBlur(blurR) : piecesLab;
-  const samples = seg.pieces.map((p) => samplePiece(p, blurred, bodyPx, params));
 
-  progress(0.15, 'Indexing box picture');
+  progress(0.12, 'Looking for the assembled puzzle');
+  const found = detectPictureQuad(small);
+  const boxLabFor = (g) => LabImage.from(box.downscaleToMax(Math.max(g.cols, g.rows) * cell * 2)).resize(g.cols * cell, g.rows * cell).boxBlur(1);
+  // A little extra blur makes the board alignment tolerant of the box art differing slightly.
+  const boardFor = (g, qs, lab, refine) => detectBoard({
+    photo: small, photoLab: blurred.boxBlur(1), boxLab: lab.boxBlur(1), grid: g, cell, quads: qs, background: seg.background, refine,
+  });
+  let boxLab = boxLabFor(grid);
+  const quads = found ? found.candidates.map((c) => c.quad) : [];
+  let board = null;
+  if (found && !layout.exact) {
+    // The board's size in piece widths tells the real layout (e.g. 38 x 27 rather than 37 x 27 for "1000").
+    // Measured on the outline found from edges, before corner fine-tuning (which adapts to the layout it is given).
+    const first = boardFor(grid, quads, boxLab, false);
+    const g = gridFromBoard(first ? first.edgeQuad : found.quad, bodyPx, layout.pieceCount || grid.cols * grid.rows);
+    const boxAspect = box.width / box.height;
+    if (g && (g.cols !== grid.cols || g.rows !== grid.rows) && Math.abs(Math.log(g.cols / g.rows / boxAspect)) < 0.12) {
+      progress(0.15, 'Measuring the assembled puzzle');
+      grid = g;
+      boxLab = boxLabFor(g);
+    }
+  }
+  if (found) board = boardFor(grid, quads, boxLab, true);
+  const workW = grid.cols * cell, workH = grid.rows * cell;
+  const affine = board?.affine ?? IDENTITY_AFFINE;
+
+  // Loose pieces: drop anything that is part of the assembled puzzle.
+  let loose = seg.pieces;
+  if (board) {
+    const mask = boardMask(board, grid, cell, small.width, small.height);
+    loose = seg.pieces.filter((p) => {
+      let inside = 0, total = 0;
+      for (let y = 0; y < p.bboxH; y += 2) for (let x = 0; x < p.bboxW; x += 2) {
+        if (!p.mask[y * p.bboxW + x]) continue;
+        total++;
+        if (mask[(y + p.bboxY) * small.width + x + p.bboxX]) inside++;
+      }
+      return inside < total * 0.3;
+    });
+  }
+  if (seg.clumps > 0) warnings.push(`${seg.clumps} group(s) of overlapping pieces were skipped. Spread pieces apart so they don't touch.`);
+  if (seg.cutOff > 0) warnings.push(`${seg.cutOff} piece(s) touching the edge of the photo or off the mat were skipped.`);
+  const samples = loose.map((p) => samplePiece(p, blurred, bodyPx, params));
+
+  progress(0.18, 'Indexing box picture');
   const locator = new PieceLocator(boxLab, params);
 
-  // Pass 1 uses global color statistics; pass 2 a color model fitted on pass 1's confident matches.
-  let color = initialColorModel(samples, boxLab);
+  // Color correction: from the assembled puzzle if we found it (exact), otherwise estimated in two passes.
+  let color = board ? board.color : initialColorModel(samples, boxLab);
   let matches = [];
-  for (let pass = 0; pass < 2; pass++) {
+  const passes = board ? 1 : 2;
+  for (let pass = 0; pass < passes; pass++) {
     matches = samples.map((s, i) => {
-      progress(0.2 + pass * 0.4 + (0.4 * i) / samples.length, `Matching pieces (pass ${pass + 1} of 2)`);
+      if (i % 4 === 0) progress(0.2 + ((pass + i / samples.length) * 0.78) / passes, passes > 1 ? `Matching pieces (pass ${pass + 1} of 2)` : 'Matching pieces');
       return locator.locate(s, color);
     });
-    if (pass === 0) color = fitColorModel(samples, matches, locator) ?? color;
+    if (pass === 0 && passes > 1) color = fitColorModel(samples, matches, locator) ?? color;
   }
 
   progress(0.98, 'Building suggestions');
+  // Match positions are in box-picture coordinates; convert to the puzzle's own cells.
+  const puzzlePos = matches.map((m) => m && fromBox(affine, m.x, m.y));
   const cellOf = (v, cells) => Math.min(cells - 1, Math.max(0, Math.floor(v / cell)));
   const conf = matches.map((m) => m?.confidence ?? 0);
   // Two pieces claiming the same cell: trust the more confident one.
   const byCell = new Map();
-  matches.forEach((m, i) => {
-    if (!m) return;
-    const key = cellOf(m.y, grid.rows) * grid.cols + cellOf(m.x, grid.cols);
+  puzzlePos.forEach((q, i) => {
+    if (!q) return;
+    const key = cellOf(q.y, grid.rows) * grid.cols + cellOf(q.x, grid.cols);
     if (!byCell.has(key)) byCell.set(key, []);
     byCell.get(key).push(i);
   });
@@ -103,8 +148,13 @@ export function analyze(box, pieces, grid, progress = () => {}, params = DEFAULT
     for (const i of list) if (i !== keep) conf[i] *= 0.3;
   }
 
+  // Cells in box-image pixels (the affine is an axis-aligned scale + shift).
   const sx = box.width / workW, sy = box.height / workH;
-  const detected = seg.pieces.map((p, i) => {
+  const boxCells = { x0: affine.tx * sx, y0: affine.ty * sy, cw: cell * affine.sx * sx, ch: cell * affine.sy * sy };
+  // Puzzle coordinates -> original photo pixels.
+  const toPhoto = board && ((x, y) => { const q = applyH(board.H, x, y); return { x: q.x * toOriginal, y: q.y * toOriginal }; });
+
+  const detected = loose.map((p, i) => {
     const m = matches[i];
     const au = [Math.cos(p.angle), Math.sin(p.angle)], av = [-Math.sin(p.angle), Math.cos(p.angle)];
     const half = bodyPx / 2;
@@ -118,27 +168,58 @@ export function analyze(box, pieces, grid, progress = () => {}, params = DEFAULT
       const [u, v] = [[0, -1], [-1, 0], [0, 1], [1, 0]][m.q & 3];
       up = { x: au[0] * u + av[0] * v, y: au[1] * u + av[1] * v };
     }
+    let placement = null;
+    if (m) {
+      const col = cellOf(puzzlePos[i].x, grid.cols), row = cellOf(puzzlePos[i].y, grid.rows);
+      placement = {
+        col,
+        row,
+        boxCenter: { x: boxCells.x0 + (col + 0.5) * boxCells.cw, y: boxCells.y0 + (row + 0.5) * boxCells.ch },
+        boxCellSize: (boxCells.cw + boxCells.ch) / 2,
+        photoTarget: toPhoto ? toPhoto((col + 0.5) * cell, (row + 0.5) * cell) : null,
+        confidence: conf[i],
+        matchError: m.error,
+      };
+    }
     return {
       id: i,
       center: { x: p.cx * toOriginal, y: p.cy * toOriginal },
       bodySize: bodyPx * toOriginal,
       corners,
       up,
-      placement: m && {
-        col: cellOf(m.x, grid.cols),
-        row: cellOf(m.y, grid.rows),
-        boxCenter: { x: m.x * sx, y: m.y * sy },
-        boxCellSize: (cell * (sx + sy)) / 2,
-        confidence: conf[i],
-        matchError: m.error,
-      },
+      placement,
     };
   });
   const unmatched = detected.filter((d) => !d.placement).length;
   if (unmatched > 0) warnings.push(`${unmatched} piece(s) could not be matched.`);
-  const suggestions = suggestPairs(detected, matches, cell);
+  const suggestions = suggestPairs(detected, puzzlePos, cell);
+
+  let boardInfo = null;
+  if (board) {
+    // Corners of every cell in photo pixels, for drawing; and which way is "up" on the board.
+    const c = toPhoto(workW / 2, workH / 2), t = toPhoto(workW / 2, workH / 2 - cell);
+    const len = Math.hypot(t.x - c.x, t.y - c.y) || 1;
+    boardInfo = {
+      quad: board.quad.map((q) => ({ x: q.x * toOriginal, y: q.y * toOriginal })),
+      // Homography puzzle cell units (col, row) -> original photo pixels.
+      H: scaleH(board.H, toOriginal, cell),
+      placed: [...board.placed],
+      up: { x: (t.x - c.x) / len, y: (t.y - c.y) / len },
+    };
+  }
   progress(1, 'Done');
-  return { grid, pieces: detected, suggestions, warnings };
+  return { grid, pieces: detected, suggestions, warnings, board: boardInfo, boxCells };
+}
+
+/** H maps puzzle work pixels -> analysis photo pixels; return one mapping cell units -> original photo pixels. */
+function scaleH(H, toOriginal, cell) {
+  const S = [toOriginal, 0, 0, 0, toOriginal, 0, 0, 0, 1];
+  const C = [cell, 0, 0, 0, cell, 0, 0, 0, 1];
+  const mul = (A, B) => Array.from({ length: 9 }, (_, k) => {
+    const r = Math.floor(k / 3), c = k % 3;
+    return A[r * 3] * B[c] + A[r * 3 + 1] * B[3 + c] + A[r * 3 + 2] * B[6 + c];
+  });
+  return mul(mul(S, H), C);
 }
 
 function samplePiece(p, img, bodyPx, params) {
