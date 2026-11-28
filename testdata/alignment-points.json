@@ -1,0 +1,16 @@
+{
+  "about": "Hand-marked features visible both on the assembled border in table-hometown-1000.jpg and in box-hometown-1000.jpg (pixel coordinates in the full-size 4080x3072 originals). Used to check how well the app lines the box picture up with the started puzzle.",
+  "pairs": [
+    { "what": "pumpkin 1 stem (bottom border)", "photo": [1043, 2220], "box": [687, 2497] },
+    { "what": "pumpkin 2 stem", "photo": [1090, 2212], "box": [742, 2485] },
+    { "what": "pumpkin 3 stem", "photo": [1145, 2217], "box": [822, 2487] },
+    { "what": "pumpkin 4 stem", "photo": [1193, 2225], "box": [885, 2497] },
+    { "what": "pumpkin 5 stem", "photo": [1220, 2227], "box": [917, 2500] },
+    { "what": "pumpkin 6 stem", "photo": [1305, 2232], "box": [1032, 2497] },
+    { "what": "pumpkin 7 stem", "photo": [1365, 2238], "box": [1112, 2502] },
+    { "what": "pumpkin 8 stem", "photo": [1447, 2235], "box": [1220, 2502] },
+    { "what": "pine tree tip 1 (left border)", "photo": [982, 1088], "box": [577, 997] },
+    { "what": "pine tree tip 2", "photo": [1028, 1092], "box": [642, 1000] },
+    { "what": "pine tree tip 3", "photo": [1058, 1093], "box": [685, 997] }
+  ]
+}

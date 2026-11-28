@@ -370,3 +370,92 @@ export function onBoard(board, cell, x, y) {
   }
   return false;
 }
+
+/**
+ * Polishes the mapping from puzzle cells to the box picture as a full perspective transform (the box photo's
+ * straightening and the board's outline are each slightly off, and box art is often cropped a little
+ * differently from the real puzzle). It moves the four corners of the puzzle in the box picture to maximise how
+ * well the picture content matches across every placed cell, comparing coarse (blurred) first, then finer.
+ *
+ * @param photoLab Lab image of the table photo; toPhoto(u, v) maps puzzle cell coordinates (col, row; fractional)
+ *   to its pixels; pitch: one cell's size in it
+ * @param boxLab Lab image of the box picture; quad0: initial box-picture positions of the puzzle's corners
+ *   [top-left, top-right, bottom-right, bottom-left]; boxCell: one cell's size in it
+ * @returns { quad, score } the refined corners and the final match score (mean correlation over placed cells)
+ */
+export function refineBoxAlignment({ photoLab, toPhoto, pitch, placed, grid, boxLab, quad0, boxCell, levels = [0.28, 0.14, 0.07], trim = +(globalThis.REFINE_TRIM ?? 0.3) }) {
+  const N = 8; // samples per side within each placed cell
+  const cells = [...placed].map((k) => k.split(',').map(Number));
+  const corners = [{ x: 0, y: 0 }, { x: grid.cols, y: 0 }, { x: grid.cols, y: grid.rows }, { x: 0, y: grid.rows }];
+  const scorer = (blurCells) => {
+    const p = photoLab.boxBlur(Math.max(1, Math.round(blurCells * pitch)));
+    const b = boxLab.boxBlur(Math.max(1, Math.round(blurCells * boxCell)));
+    const pts = [];
+    for (const [c, r] of cells) {
+      const n = N * N, uv = new Float32Array(2 * n), pl = new Float32Array(n), pa = new Float32Array(n), pb = new Float32Array(n);
+      for (let j = 0, k = 0; j < N; j++) for (let i = 0; i < N; i++, k++) {
+        const u = c + 0.1 + (0.8 * (i + 0.5)) / N, v = r + 0.1 + (0.8 * (j + 0.5)) / N;
+        const q = toPhoto(u, v);
+        uv[2 * k] = u; uv[2 * k + 1] = v;
+        pl[k] = p.l.sample(q.x, q.y); pa[k] = p.a.sample(q.x, q.y); pb[k] = p.b.sample(q.x, q.y);
+      }
+      pts.push({ uv, pl, pa, pb });
+    }
+    const bl = new Float32Array(N * N), ba = new Float32Array(N * N), bb = new Float32Array(N * N);
+    return (quad) => {
+      const H = homography(corners, quad);
+      if (!H) return -1;
+      const per = new Float32Array(pts.length);
+      pts.forEach((c, i) => {
+        for (let k = 0; k < N * N; k++) {
+          const q = applyH(H, c.uv[2 * k], c.uv[2 * k + 1]);
+          bl[k] = b.l.sample(q.x, q.y); ba[k] = b.a.sample(q.x, q.y); bb[k] = b.b.sample(q.x, q.y);
+        }
+        per[i] = 0.5 * ncc(c.pl, bl) + 0.25 * ncc(c.pa, ba) + 0.25 * ncc(c.pb, bb);
+      });
+      // Trimmed mean: ignore the worst-matching cells (under a title banner on the box, wrongly detected
+      // as placed, glare...) so they can't pull the alignment.
+      per.sort();
+      let sum = 0;
+      const from = Math.floor(per.length * trim);
+      for (let i = from; i < per.length; i++) sum += per[i];
+      return sum / (per.length - from);
+    };
+  };
+  let quad = quad0.map((p) => ({ ...p }));
+  let score = -1;
+  levels.forEach((blurCells, li) => {
+    const f = scorer(blurCells);
+    score = f(quad);
+    if (li === 0) {
+      // Several starting points (shifted by up to a cell) for the coarsest level; keep the best-scoring.
+      for (const dy of [-1, 0, 1]) for (const dx of [-1, 0, 1]) {
+        if (!dx && !dy) continue;
+        const t = quad0.map((p) => ({ x: p.x + dx * boxCell * 0.7, y: p.y + dy * boxCell * 0.7 }));
+        const sc = f(t);
+        if (sc > score) { score = sc; quad = t; }
+      }
+    }
+    let step = boxCell * (li === 0 ? 1 : 0.5 / li);
+    // Moves: shift the whole picture, stretch it (per axis, about its center), or move one corner.
+    const moves = [];
+    for (const ax of ['x', 'y']) for (const sg of [1, -1]) {
+      moves.push((q, d) => q.map((p) => ({ ...p, [ax]: p[ax] + sg * d })));
+      moves.push((q, d) => {
+        const c = q.reduce((m, p) => m + p[ax], 0) / 4, span = Math.max(...q.map((p) => p[ax])) - Math.min(...q.map((p) => p[ax]));
+        return q.map((p) => ({ ...p, [ax]: p[ax] + (sg * d * (p[ax] - c)) / (span / 2) }));
+      });
+      for (let k = 0; k < 4; k++) moves.push((q, d) => q.map((p, i) => (i === k ? { ...p, [ax]: p[ax] + sg * d } : p)));
+    }
+    while (step > boxCell * 0.02) {
+      let improved = false;
+      for (const move of moves) {
+        const t = move(quad, step);
+        const sc = f(t);
+        if (sc > score + 1e-5) { score = sc; quad = t; improved = true; }
+      }
+      if (!improved) step /= 2;
+    }
+  });
+  return { quad, score };
+}

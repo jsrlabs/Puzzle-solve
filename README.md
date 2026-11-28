@@ -102,6 +102,7 @@ box straightening or board detection).
    * Cells whose content matches are marked placed, rejecting cells that show bare mat. Isolated matches are dropped and small gaps along the edge are filled.
    * The colour correction for loose pieces is fitted on these cells.
    * The layout (columns × rows) is measured from the board's size in piece widths.
+2c. **Polish the alignment** (`board.js`, `refineBoxAlignment`): the coarse alignment above only shifts and stretches the box picture evenly. Here the puzzle's four corners in the box picture are moved, coarse-to-fine, to maximise how well picture content matches across the placed cells (ignoring the worst 30%, such as cells under a title banner). The box picture is then re-drawn so every puzzle cell sits on an exact grid. `node test/alignment-check.js` scores this against hand-marked features in `testdata/alignment-points.json`.
 3. **Choose the next piece** (web: `planner.js`): among loose pieces whose cell is free and next to a placed cell, pick the most confident match, with a bonus for touching several placed pieces. When nothing connects, pick the most confident corner piece. (The Kotlin `PuzzleSolver` instead suggests pairs of loose pieces to join.)
 
 ## Building the Android app (paused)

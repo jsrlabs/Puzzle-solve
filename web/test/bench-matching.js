@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 import { loadPhoto } from './photos.js';
 import { LabImage } from '../src/engine/images.js';
 import { detectPictureQuad } from '../src/engine/quad.js';
-import { warpQuad, applyH } from '../src/engine/geometry.js';
+import { warpQuad, applyH, homography } from '../src/engine/geometry.js';
 import { analyze, DEFAULT_PARAMS } from '../src/engine/solver.js';
 import { backgroundColor } from '../src/engine/segmenter.js';
 import { PieceLocator } from '../src/engine/locator.js';
@@ -20,12 +20,24 @@ if (process.env.WITH_CV) {
 
 const DIM = +(process.env.BENCH_DIM || 4096);
 const bp = loadPhoto('box-hometown-1000.jpg', DIM);
-const box = warpQuad(bp, detectPictureQuad(bp).quad, DIM);
+const straight = warpQuad(bp, detectPictureQuad(bp).quad, DIM);
 const photo = loadPhoto('table-hometown-1000.jpg', DIM);
-const a = analyze(box, photo, { cols: 37, rows: 27, pieceCount: 1000 }, () => {}, { ...DEFAULT_PARAMS, ...(process.env.OVERVIEW ? { overviewMaxDim: +process.env.OVERVIEW } : {}) });
+const a = analyze(straight, photo, { cols: 37, rows: 27, pieceCount: 1000 }, () => {}, {
+  ...DEFAULT_PARAMS,
+  ...(process.env.OVERVIEW ? { overviewMaxDim: +process.env.OVERVIEW } : {}),
+  ...(process.env.REFINE ? { refineAlignment: process.env.REFINE === '1' } : {}),
+});
 const { board, boxCells, grid } = a;
-const inside = ([c, r]) => r > 0 && boxCells.x0 + c * boxCells.cw >= 0 && boxCells.y0 + r * boxCells.ch >= 0 &&
-  boxCells.x0 + (c + 1) * boxCells.cw <= box.width && boxCells.y0 + (r + 1) * boxCells.ch <= box.height;
+// The box picture whose cells line up with the puzzle (re-drawn when the alignment is polished).
+const box = a.boxImage ?? straight;
+// A cell counts if its spot lies within the original box art (and isn't the top row, under the title banner).
+const cellCorners = [{ x: 0, y: 0 }, { x: grid.cols, y: 0 }, { x: grid.cols, y: grid.rows }, { x: 0, y: grid.rows }];
+const toStraight = a.boxQuad ? homography(cellCorners, a.boxQuad) : null;
+const inStraight = (u, v) => {
+  const q = toStraight ? applyH(toStraight, u, v) : { x: boxCells.x0 + u * boxCells.cw, y: boxCells.y0 + v * boxCells.ch };
+  return q.x >= 0 && q.y >= 0 && q.x <= straight.width && q.y <= straight.height;
+};
+const inside = ([c, r]) => r > 0 && inStraight(c, r) && inStraight(c + 1, r + 1) && inStraight(c + 1, r) && inStraight(c, r + 1);
 const cells = board.placed.map((k) => k.split(',').map(Number)).filter(inside);
 console.log(`grid ${grid.cols}x${grid.rows}, placed ${board.placed.length}, fair subset ${cells.length}`);
 const photoLab = LabImage.from(photo);
@@ -81,12 +93,16 @@ for (const [cellPx, g, fineCell, fineG] of [[16, 12, 0, 0], [16, 12, 48, 20], [1
     const bv = cells.flatMap(([c, r], i) => [...all[i].u].map((su, n) => boxLab[k].sample(A.sx * (c + 0.5 + su) * cellPx + A.tx, A.sy * (r + 0.5 + all[i].v[n]) * cellPx + A.ty)));
     const [mp, sp] = st(pv), [mb, sb] = st(bv); color['gain' + K] = sb / sp; color['off' + K] = mb - (sb / sp) * mp;
   }
+  const preds = [];
   const res = cells.map(([c, r], i) => {
     const m = loc.locate(all[i], color, fineAll && fineAll[i]);
-    if (!m) return [false, false];
-    return score(c, r, Math.floor(((m.x - A.tx) / A.sx) / cellPx), Math.floor(((m.y - A.ty) / A.sy) / cellPx));
+    if (!m) { preds.push('none'); return [false, false]; }
+    const pc = Math.floor(((m.x - A.tx) / A.sx) / cellPx), pr = Math.floor(((m.y - A.ty) / A.sy) / cellPx);
+    preds.push(`${pc},${pr}`);
+    return score(c, r, pc, pr);
   });
   report(`current matcher cell=${cellPx}px grid=${g}${fineCell ? ` + fine check ${fineCell}px grid=${fineG}` : ''}`, res, performance.now() - t0);
+  if (process.env.FAILS && fineCell) console.log('  failures (true -> predicted):', cells.map(([c, r], i) => res[i][0] ? null : `${c},${r}->${preds[i]}`).filter(Boolean).join(' '));
 }
 
 if (process.env.WITH_CV) { // OpenCV template matching (mat pixels filled with the piece's mean color)

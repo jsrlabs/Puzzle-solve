@@ -331,7 +331,8 @@ function runAnalysis() {
     if (msg.kind === 'start') {
       if (!state.boardGrid || state.boardGrid.cols !== g.cols || state.boardGrid.rows !== g.rows) state.placed.clear();
       state.boardGrid = g;
-      state.analyzedBox = cropped;
+      // The engine may re-draw the box picture so it lines up exactly with the puzzle on the table.
+      state.analyzedBox = msg.result.boxImage ? rgbaToCanvas(msg.result.boxImage) : cropped;
       state.usedPieces.clear();
       state.skipped.clear();
     }

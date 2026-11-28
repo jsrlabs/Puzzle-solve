@@ -1,8 +1,8 @@
 // Entry point of the solver: box picture + photo of the table (loose pieces, maybe the partly built puzzle)
 // -> where each loose piece goes, which cells are already placed. Pure JavaScript; runs in a Web Worker or Node.
 
-import { detectBoard, fromBox, gridFromBoard, IDENTITY_AFFINE, onBoard } from './board.js';
-import { applyH } from './geometry.js';
+import { detectBoard, fromBox, gridFromBoard, IDENTITY_AFFINE, onBoard, refineBoxAlignment } from './board.js';
+import { applyH, warpQuad } from './geometry.js';
 import { LabImage, median } from './images.js';
 import { PieceLocator } from './locator.js';
 import { nextPlacement } from './planner.js';
@@ -13,6 +13,9 @@ export const DEFAULT_PARAMS = Object.freeze({
   overviewMaxDim: 2400, // reduced copy of the photo used to find the board and plan the sections
   sectionPx: 1600, // the full-resolution photo is scanned in sections about this size
   stopScore: 0.25, // stop scanning sections once a piece to place next scores this well
+  refineAlignment: true, // polish the box/board alignment as a full perspective transform
+  refineCellPx: 32, // box picture resolution (pixels per cell) used for that
+  boxMaxDim: 4096,
   cellPx: 16, // pixels per puzzle cell in the internal box picture
   sampleGrid: 12, // samples per side taken from each piece body
   sampleSpan: 0.8, // fraction of the body that is sampled (avoids cut edges)
@@ -71,6 +74,7 @@ export function analyze(box, photo, layout, progress = () => {}, params = DEFAUL
  * first) for scan(). Returns a session object.
  */
 export function prepare(box, photo, layout, progress = () => {}, params = DEFAULT_PARAMS) {
+  const originalBox = box;
   const cell = params.cellPx;
   let grid = { cols: layout.cols, rows: layout.rows };
   const warnings = [];
@@ -139,6 +143,31 @@ export function prepare(box, photo, layout, progress = () => {}, params = DEFAUL
   }
   const board = found ? boardFor(grid, quads, boxLab, true) : null;
 
+  // Polish the alignment of the box picture with the assembled puzzle as a full perspective transform, then
+  // re-draw the box picture so every puzzle cell sits on an exact grid: everything after this (matching,
+  // drawing) then uses the polished alignment with no further bookkeeping.
+  let boxAlignScore = null, boxQuad = null; // puzzle corners in the (original) straightened box picture
+  if (board && params.refineAlignment) {
+    progress(0.75, 'Lining up the box picture with your puzzle');
+    const A = board.affine ?? IDENTITY_AFFINE;
+    const refBox = box.downscaleToMax(Math.max(grid.cols, grid.rows) * params.refineCellPx);
+    const k = refBox.width / box.width, sxw = box.width / (grid.cols * cell), syw = box.height / (grid.rows * cell);
+    // Puzzle cell (u, v) -> straightened box pixels, from the coarse alignment.
+    const coarse = (u, v) => ({ x: (A.sx * u * cell + A.tx) * sxw, y: (A.sy * v * cell + A.ty) * syw });
+    const quad0 = [[0, 0], [grid.cols, 0], [grid.cols, grid.rows], [0, grid.rows]].map(([u, v]) => { const q = coarse(u, v); return { x: q.x * k, y: q.y * k }; });
+    const pitchOv = Math.hypot(applyH(board.H, cell, 0).x - applyH(board.H, 0, 0).x, applyH(board.H, cell, 0).y - applyH(board.H, 0, 0).y);
+    const { quad, score } = refineBoxAlignment({
+      photoLab: ovLab, toPhoto: (u, v) => applyH(board.H, u * cell, v * cell), pitch: pitchOv,
+      placed: board.placed, grid, boxLab: LabImage.from(refBox), quad0, boxCell: quad0[1].x / grid.cols - quad0[0].x / grid.cols,
+    });
+    boxAlignScore = score;
+    boxQuad = quad.map((p) => ({ x: p.x / k, y: p.y / k }));
+    // Re-draw the box picture with the puzzle's corners at its corners (cells on an exact grid).
+    box = warpQuad(box, boxQuad, params.boxMaxDim);
+    boxLab = boxLabFor(grid);
+    board.affine = IDENTITY_AFFINE;
+  }
+
   progress(0.85, 'Indexing box picture');
   const locator = new PieceLocator(boxLab, params);
   if (params.fineCellPx) {
@@ -163,7 +192,7 @@ export function prepare(box, photo, layout, progress = () => {}, params = DEFAUL
   }
   progress(1, 'Ready');
   return {
-    params, box, photo, grid, cell, board, boardInfo, boxLab, locator, affine, boxCells, toPhoto, toFull, bodyFull,
+    params, box, originalBox, boxAlignScore, boxQuad, photo, grid, cell, board, boardInfo, boxLab, locator, affine, boxCells, toPhoto, toFull, bodyFull,
     color: board ? board.color : null, tiles, order, first, given, scanned: [], pieces: [], puzzlePos: [], warnings,
     clumps: 0, cutOff: 0,
   };
@@ -314,6 +343,9 @@ function result(S) {
     warnings,
     board: S.boardInfo,
     boxCells: S.boxCells,
+    // The box picture the cells refer to (re-drawn when the alignment was polished), if it changed.
+    boxImage: S.box !== S.originalBox ? S.box : null,
+    boxQuad: S.boxQuad, // where the puzzle's corners lie in the original box picture (when re-drawn)
     scan: {
       total: S.order.length,
       scanned: S.scanned.length,

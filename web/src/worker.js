@@ -29,6 +29,7 @@ self.onmessage = (e) => {
     } else if (msg.type === 'more') {
       if (!session) throw new Error('Nothing to continue: analyse the photos first.');
       const result = scan(session, { placed: msg.placed, excluded: msg.excluded }, progress(0, 1));
+      result.boxImage = null; // already sent with the first result
       self.postMessage({ id: msg.id, type: 'result', kind: 'more', result });
     }
   } catch (err) {
